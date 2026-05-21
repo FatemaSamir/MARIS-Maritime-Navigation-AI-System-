@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"http://localhost:8000/api/analytics/summary\")",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('total_vessels:', d['total_vessels'], '| daily_stats rows:', len\\(d['daily_stats']\\)\\)\")",
+      "Bash(curl -s \"http://localhost:8000/api/vessels?limit=3\")",
+      "Bash(python -m json.tool)",
+      "Bash(docker exec postgres *)",
+      "Bash(docker exec *)",
+      "PowerShell(docker exec ais-producer *)",
+      "Bash(curl -s \"http://localhost:8000/api/anomalies?hours_back=1&limit=3\")",
+      "Bash(curl -s \"http://localhost:8000/api/collision-risks?hours_back=1\")",
+      "Bash(curl -s \"http://localhost:8000/api/alerts?hours_back=1&limit=3\")",
+      "Bash(curl -s \"http://localhost:8000/api/density?hours_back=24&min_vessels=1\")"
+    ]
+  }
+}

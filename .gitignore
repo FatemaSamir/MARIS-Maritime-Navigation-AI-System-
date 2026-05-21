@@ -1,0 +1,52 @@
+# Large data files
+*.csv
+*.zst
+*.parquet
+*.json.gz
+data/
+raw/
+bronze/
+silver/
+gold/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Node / React
+node_modules/
+build/
+dist/
+frontend/node_modules/
+frontend/build/
+
+# Environment & secrets
+.env
+.env.*
+*.env
+
+# Docker volumes
+volumes/
+postgres_data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML models (if large)
+*.pkl
+*.joblib
+*.h5
+*.model
