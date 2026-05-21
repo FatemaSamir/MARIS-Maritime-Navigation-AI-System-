@@ -50,3 +50,9 @@ Thumbs.db
 *.joblib
 *.h5
 *.model
+data/
+models/
+*.csv
+*.zst
+*.parquet
+*.pkl
