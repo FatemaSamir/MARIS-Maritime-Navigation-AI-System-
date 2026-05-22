@@ -37,7 +37,7 @@ BRONZE_SCHEMA = """
     cargo STRING, transceiver_class STRING,
     risk_level STRING, lat_bin DOUBLE, lon_bin DOUBLE,
     is_stopped BOOLEAN, is_slow BOOLEAN, is_speeding BOOLEAN,
-    in_suez_zone BOOLEAN, data_split STRING,
+    in_us_port_zone BOOLEAN, data_split STRING,
     event_time TIMESTAMP_NTZ, ingestion_time TIMESTAMP_NTZ,
     year INT, month INT, day INT, hour INT
 """
@@ -54,7 +54,7 @@ SILVER_SCHEMA = """
     risk_level STRING, lat_bin DOUBLE, lon_bin DOUBLE,
     lat_bin_fine DOUBLE, lon_bin_fine DOUBLE,
     is_stopped BOOLEAN, is_slow BOOLEAN, is_speeding BOOLEAN,
-    in_suez_zone BOOLEAN,
+    in_us_port_zone BOOLEAN,
     sog_change DOUBLE, heading_change DOUBLE,
     time_delta_sec DOUBLE, distance_nm DOUBLE,
     data_split STRING,

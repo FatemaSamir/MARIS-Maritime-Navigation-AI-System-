@@ -3,7 +3,7 @@ streamlit_app.py — Maritime Navigation AI System
 Complete dashboard with all 10 features.
 Reads from PostgreSQL (Star Schema) + Kafka live feed.
 """
-import json, os, sys, random, uuid
+import json, math, os, sys, random, uuid
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -21,6 +21,27 @@ from common.config import (
 )
 from ml.scorer import get_scorer
 
+# ── Dead-reckoning helpers ─────────────────────────────────────────────────────
+def _predict_position(lat, lon, sog_kn, heading_deg, minutes=5):
+    if not sog_kn or sog_kn < 0.1:
+        return None
+    dist_nm = sog_kn * (minutes / 60)
+    hd_rad = math.radians(heading_deg)
+    new_lat = lat + (dist_nm * math.cos(hd_rad)) / 60
+    new_lon = lon + (dist_nm * math.sin(hd_rad)) / (60 * math.cos(math.radians(lat)))
+    return new_lat, new_lon
+
+
+def _haversine_nm(lat1, lon1, lat2, lon2):
+    R = 3440.065
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Maritime Navigation AI",
@@ -37,6 +58,7 @@ st.markdown("""
 }
 [data-testid="stMetricLabel"] { color:#A0AEC0 !important; font-size:13px; }
 [data-testid="stMetricValue"] { color:#FFFFFF !important; font-size:24px; font-weight:700; }
+.alert-critical { background:#4a0000; border-left:4px solid #b91c1c; padding:8px 12px; border-radius:6px; margin:4px 0; }
 .alert-high   { background:#7f1d1d; border-left:4px solid #ef4444; padding:8px 12px; border-radius:6px; margin:4px 0; }
 .alert-medium { background:#78350f; border-left:4px solid #f59e0b; padding:8px 12px; border-radius:6px; margin:4px 0; }
 .alert-low    { background:#14532d; border-left:4px solid #22c55e; padding:8px 12px; border-radius:6px; margin:4px 0; }
@@ -343,44 +365,57 @@ if "Live Vessel Map" in page:
 elif "Historical Replay" in page:
     st.title("⏮️ Historical Replay")
 
-    col1, col2 = st.columns([2,1])
+    _TOP_MMSIS = [
+        ("366772760", "WSF TACOMA",   "avg 7.5 kn, 304 pts"),
+        ("366772960", "WSF KITTITAS", "avg 5.9 kn, 305 pts"),
+        ("367104060", "ALAN T",       "avg 5.3 kn, 306 pts"),
+    ]
+
+    col1, col2 = st.columns([3, 1])
     with col1:
-        mmsi_replay = st.text_input("MMSI to replay", placeholder="e.g. 368000000")
+        mmsi_replay = st.text_input(
+            "MMSI to replay",
+            placeholder=f"e.g. {_TOP_MMSIS[0][0]}",
+        )
     with col2:
-        replay_split = st.selectbox("Data split", ["live","test","train","all"])
+        st.caption("**Vessels with movement:**")
+        for _m, _n, _note in _TOP_MMSIS:
+            st.caption(f"`{_m}` {_n} ({_note})")
 
     if mmsi_replay:
-        tdf = get_track(mmsi_replay)
-        if tdf.empty:
-            # Try PostgreSQL
-            split_filter = "" if replay_split == "all" else f"AND data_split='{replay_split}'"
-            pg_df = read_pg(f"""
-                SELECT lat, lon, sog, cog, heading, risk_level,
-                       is_anomaly, base_datetime
-                FROM fact_ais_track
-                WHERE mmsi = '{mmsi_replay}' {split_filter}
-                ORDER BY base_datetime
-                LIMIT 5000
-            """)
-            tdf = pg_df if not pg_df.empty else tdf
+        tdf = read_pg("""
+            SELECT lat, lon, sog, heading, base_datetime
+            FROM fact_ais_track
+            WHERE mmsi = :mmsi
+            ORDER BY base_datetime
+            LIMIT 5000
+        """, params={"mmsi": mmsi_replay.strip()})
 
         if not tdf.empty:
-            v_name = str(tdf["vessel_name"].iloc[-1]) if "vessel_name" in tdf.columns else mmsi_replay
-            st.subheader(f"Track: {v_name} ({mmsi_replay})")
+            tdf["base_datetime"] = pd.to_datetime(tdf["base_datetime"], errors="coerce")
+            tdf = tdf.sort_values("base_datetime").reset_index(drop=True)
 
-            if "base_datetime" in tdf.columns:
-                tdf["base_datetime"] = pd.to_datetime(tdf["base_datetime"], errors="coerce")
-                tdf = tdf.sort_values("base_datetime")
+            # Look up vessel name
+            _vinfo = read_pg(
+                "SELECT vessel_name FROM fact_vessel_latest WHERE mmsi = :mmsi LIMIT 1",
+                params={"mmsi": mmsi_replay.strip()},
+            )
+            v_name = (
+                str(_vinfo["vessel_name"].iloc[0])
+                if not _vinfo.empty and _vinfo["vessel_name"].iloc[0]
+                else mmsi_replay
+            )
+            st.subheader(f"Track: {v_name} ({mmsi_replay}) — {len(tdf):,} points")
 
-            frame = st.slider("Timeline", 0, max(len(tdf)-1, 1),
-                              max(len(tdf)-1, 1))
+            frame = st.slider("Timeline", 0, max(len(tdf) - 1, 1),
+                              max(len(tdf) - 1, 1))
             curr = tdf.iloc[frame]
 
-            s1,s2,s3,s4 = st.columns(4)
-            s1.metric("Frame",  f"{frame+1}/{len(tdf)}")
-            s2.metric("SOG",    f"{curr.get('sog',0):.1f} kn")
-            s3.metric("Risk",   curr.get("risk_level","—"))
-            s4.metric("Time",   str(curr.get("base_datetime",""))[:19])
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Frame",   f"{frame + 1}/{len(tdf)}")
+            s2.metric("SOG",     f"{curr.get('sog', 0):.1f} kn")
+            s3.metric("Heading", f"{curr.get('heading', 0):.0f}°")
+            s4.metric("Time",    str(curr.get("base_datetime", ""))[:19])
 
             fig = go.Figure()
             fig.add_trace(go.Scattermapbox(
@@ -401,13 +436,20 @@ elif "Historical Replay" in page:
                                 lon=float(curr["lon"])),
                     zoom=9,
                 ),
-                margin={"r":0,"t":0,"l":0,"b":0},
+                margin={"r": 0, "t": 0, "l": 0, "b": 0},
                 height=520,
                 paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No track data. Start producer and wait for data.")
+            st.warning(
+                f"No track data for MMSI **{mmsi_replay}**.\n\n"
+                "Try one of these vessels with confirmed movement:\n\n"
+                + "\n".join(
+                    f"- `{_m}` — **{_n}** ({_note})"
+                    for _m, _n, _note in _TOP_MMSIS
+                )
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -422,6 +464,7 @@ elif "Traffic Heatmap" in page:
                vessel_count, avg_sog, congestion_level
         FROM fact_traffic_density
         WHERE hour_bucket >= NOW() - INTERVAL '24 hours'
+        AND vessel_count >= 1
         ORDER BY vessel_count DESC
         LIMIT 1000
     """)
@@ -478,14 +521,13 @@ elif "Anomaly" in page:
     st.title("⚠️ Anomaly Detection")
 
     anomalies_df = read_pg("""
-        SELECT mmsi_1 AS mmsi, vessel_name_1 AS vessel_name,
-               alert_type, severity, lat, lon,
-               anomaly_score, description, created_at
-        FROM fact_alerts
-        WHERE alert_type IN ('SUDDEN_STOP','SHARP_TURN',
-              'UNUSUAL_SPEED','STATIONARY_RISK','ML_ANOMALY')
-        AND created_at >= NOW() - INTERVAL '24 hours'
-        ORDER BY anomaly_score DESC, created_at DESC
+        SELECT fa.mmsi_1 AS mmsi, fa.vessel_name_1 AS vessel_name,
+               fa.alert_type, fa.severity, fa.lat, fa.lon,
+               fa.anomaly_score, fa.description, fa.created_at
+        FROM fact_alerts fa
+        WHERE fa.alert_type NOT IN ('COLLISION_RISK')
+        AND fa.created_at >= NOW() - INTERVAL '24 hours'
+        ORDER BY fa.created_at DESC
         LIMIT 200
     """)
 
@@ -507,9 +549,10 @@ elif "Anomaly" in page:
 
     st.divider()
     if not anomalies_df.empty:
-        st.subheader(f"Historical Anomalies ({len(anomalies_df)})")
+        st.metric("Anomalies (last 24 h)", len(anomalies_df))
+        st.divider()
 
-        # Anomaly type distribution
+        # Bar chart of alert types
         type_counts = anomalies_df["alert_type"].value_counts().reset_index()
         type_counts.columns = ["type", "count"]
         fig_bar = px.bar(type_counts, x="count", y="type",
@@ -522,7 +565,28 @@ elif "Anomaly" in page:
                                coloraxis_showscale=False)
         st.plotly_chart(fig_bar, use_container_width=True)
 
-        st.dataframe(anomalies_df, use_container_width=True, height=350)
+        # Table: mmsi, vessel_name, type, severity, time
+        show_cols = [c for c in ["mmsi","vessel_name","alert_type","severity","created_at"]
+                     if c in anomalies_df.columns]
+        st.dataframe(anomalies_df[show_cols], use_container_width=True, height=300)
+
+        # Map: anomaly locations as red markers
+        map_anom = anomalies_df.dropna(subset=["lat","lon"]).copy()
+        if not map_anom.empty:
+            fig_amap = px.scatter_mapbox(
+                map_anom, lat="lat", lon="lon",
+                hover_name="mmsi",
+                hover_data=[c for c in ["vessel_name","alert_type","severity"]
+                            if c in map_anom.columns],
+                color_discrete_sequence=["#EF5350"],
+                zoom=MAP_DEFAULT_ZOOM, height=450,
+            )
+            fig_amap.update_layout(
+                mapbox_style="open-street-map",
+                margin={"r":0,"t":0,"l":0,"b":0},
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_amap, use_container_width=True)
     else:
         st.info("No historical anomalies yet. Run training and live streaming.")
 
@@ -532,6 +596,59 @@ elif "Anomaly" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Collision" in page:
     st.title("🚨 Collision Risk Detection")
+
+    # DB: recent collision risks from fact_alerts
+    coll_db = read_pg("""
+        SELECT mmsi_1, mmsi_2, vessel_name_1, vessel_name_2,
+               severity, distance_nm, lat, lon,
+               description, created_at
+        FROM fact_alerts
+        WHERE alert_type = 'COLLISION_RISK'
+        AND is_resolved = false
+        AND created_at >= NOW() - INTERVAL '6 hours'
+        ORDER BY severity DESC, created_at DESC
+        LIMIT 100
+    """)
+
+    if not coll_db.empty:
+        st.metric("Active Collision Risks (last 6 h)", len(coll_db))
+        st.divider()
+
+        for _, row in coll_db.head(20).iterrows():
+            sev  = str(row.get("severity", "MEDIUM"))
+            css  = "alert-critical" if sev == "CRITICAL" else "alert-high" if sev == "HIGH" else "alert-medium"
+            v1   = row.get("vessel_name_1") or row.get("mmsi_1", "?")
+            v2   = row.get("vessel_name_2") or row.get("mmsi_2", "?")
+            dist = row.get("distance_nm")
+            dist_str = f"{dist:.3f} nm" if dist is not None else "—"
+            st.markdown(
+                f"<div class='{css}'>"
+                f"<b>🚨 {sev}</b> — {v1} ↔ {v2}<br/>"
+                f"<small>Distance: {dist_str} | {str(row.get('created_at',''))[:19]}</small>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        map_coll = coll_db.dropna(subset=["lat","lon"]).copy()
+        if not map_coll.empty:
+            fig_c = px.scatter_mapbox(
+                map_coll, lat="lat", lon="lon",
+                hover_name="mmsi_1",
+                hover_data=[c for c in ["mmsi_2","severity","distance_nm"]
+                            if c in map_coll.columns],
+                color="severity",
+                color_discrete_map={"CRITICAL":"#7f1d1d","HIGH":"#EF5350",
+                                    "MEDIUM":"#FFA726","LOW":"#66BB6A"},
+                zoom=MAP_DEFAULT_ZOOM, height=450,
+            )
+            fig_c.update_layout(
+                mapbox_style="open-street-map",
+                margin={"r":0,"t":0,"l":0,"b":0},
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_c, use_container_width=True)
+
+        st.divider()
 
     # Live collision detection from current vessel positions
     if not filtered.empty and len(filtered) > 1:
@@ -592,9 +709,8 @@ elif "Alerts" in page:
     st.title("🔔 Maritime Alerts")
 
     alerts_df = read_pg("""
-        SELECT id, alert_type, severity,
-               mmsi_1 AS mmsi, vessel_name_1 AS vessel,
-               description, is_resolved, created_at
+        SELECT alert_type, severity, mmsi_1, vessel_name_1,
+               lat, lon, description, is_resolved, created_at
         FROM fact_alerts
         ORDER BY created_at DESC
         LIMIT 500
@@ -611,15 +727,16 @@ elif "Alerts" in page:
 
         for _, row in alerts_df.head(50).iterrows():
             sev   = str(row.get("severity","LOW"))
-            css   = ("alert-high" if sev in ("CRITICAL","HIGH")
-                     else "alert-medium" if sev=="MEDIUM"
+            css   = ("alert-critical" if sev == "CRITICAL"
+                     else "alert-high" if sev == "HIGH"
+                     else "alert-medium" if sev == "MEDIUM"
                      else "alert-low")
             emoji = ("🔴" if sev in ("CRITICAL","HIGH")
                      else "🟡" if sev == "MEDIUM" else "🟢")
             st.markdown(
                 f"<div class='{css}'>"
                 f"{emoji} <b>{sev}</b> [{row['alert_type']}] — "
-                f"{row.get('vessel') or row.get('mmsi','?')}<br/>"
+                f"{row.get('vessel_name_1') or row.get('mmsi_1','?')}<br/>"
                 f"<small>{row.get('description','')}</small>"
                 f"</div>",
                 unsafe_allow_html=True,
@@ -789,5 +906,56 @@ elif "Search" in page:
                     paper_bgcolor="rgba(0,0,0,0)",
                 )
                 st.plotly_chart(fig, use_container_width=True)
+
+                # ── Predicted position ─────────────────────────────────────
+                st.divider()
+                st.subheader("📍 Predicted Position (5 min)")
+                mmsi_list = results["mmsi"].astype(str).tolist()
+                sel_mmsi = st.selectbox("Select vessel", mmsi_list)
+                if sel_mmsi:
+                    sel_row = results[results["mmsi"].astype(str) == sel_mmsi].iloc[0]
+                    p_lat = float(sel_row.get("lat") or 0)
+                    p_lon = float(sel_row.get("lon") or 0)
+                    p_sog = float(sel_row.get("sog") or 0)
+                    p_hdg = float(sel_row.get("heading") or sel_row.get("cog") or 0)
+                    pred = _predict_position(p_lat, p_lon, p_sog, p_hdg)
+                    if pred:
+                        pr_lat, pr_lon = pred
+                        dist = _haversine_nm(p_lat, p_lon, pr_lat, pr_lon)
+                        pc1, pc2, pc3 = st.columns(3)
+                        pc1.metric("Predicted Lat", f"{pr_lat:.5f}°")
+                        pc2.metric("Predicted Lon", f"{pr_lon:.5f}°")
+                        pc3.metric("Distance", f"{dist:.3f} nm")
+                        fig_p = go.Figure()
+                        fig_p.add_trace(go.Scattermapbox(
+                            lat=[p_lat], lon=[p_lon], mode="markers",
+                            marker=dict(size=14, color="#3B82F6"),
+                            name=f"Current ({sel_mmsi})",
+                        ))
+                        fig_p.add_trace(go.Scattermapbox(
+                            lat=[pr_lat], lon=[pr_lon], mode="markers",
+                            marker=dict(size=14, color="rgba(0,0,0,0)",
+                                        line=dict(width=3, color="#42A5F5")),
+                            name="Predicted (5 min)",
+                        ))
+                        fig_p.add_trace(go.Scattermapbox(
+                            lat=[p_lat, pr_lat], lon=[p_lon, pr_lon], mode="lines",
+                            line=dict(width=2, color="#42A5F5"),
+                            name="Projection",
+                        ))
+                        fig_p.update_layout(
+                            mapbox=dict(
+                                style="open-street-map",
+                                center=dict(lat=(p_lat + pr_lat) / 2,
+                                            lon=(p_lon + pr_lon) / 2),
+                                zoom=10,
+                            ),
+                            margin={"r": 0, "t": 0, "l": 0, "b": 0},
+                            height=350,
+                            paper_bgcolor="rgba(0,0,0,0)",
+                        )
+                        st.plotly_chart(fig_p, use_container_width=True)
+                    else:
+                        st.info(f"Vessel {sel_mmsi} is stationary (SOG < 0.1 kn) — no prediction available.")
         else:
             st.warning(f"No vessels found for '{query}'")

@@ -166,29 +166,25 @@ class FactTrafficDensity(Base):
     Pre-aggregated for fast heatmap rendering.
     Powers: Feature 3 (Traffic Density Heatmap),
             Feature 4 (Congestion Detection)
+
+    NOTE: actual table has no id column — composite PK on (lat_bin, lon_bin, hour_bucket)
     """
     __tablename__ = "fact_traffic_density"
 
-    id               = Column(Integer,  primary_key=True,
-                               autoincrement=True)
-    lat_bin          = Column(Float,    nullable=False)
-    lon_bin          = Column(Float,    nullable=False)
-    hour_bucket      = Column(DateTime, nullable=False, index=True)
-    vessel_count     = Column(Integer,  nullable=False)
-    unique_vessels   = Column(Integer)
+    lat_bin          = Column(Float,      nullable=False, primary_key=True)
+    lon_bin          = Column(Float,      nullable=False, primary_key=True)
+    hour_bucket      = Column(DateTime,   nullable=False, primary_key=True,
+                              index=True)
+    vessel_count     = Column(BigInteger, nullable=False)
+    unique_vessels   = Column(BigInteger)
     avg_sog          = Column(Float)
-    stopped_count    = Column(Integer,  default=0)
-    cargo_count      = Column(Integer,  default=0)
-    tanker_count     = Column(Integer,  default=0)
-    congestion_level = Column(String(10), index=True)
-    data_split       = Column(String(20))
-    created_at       = Column(DateTime, default=datetime.utcnow)
+    stopped_count    = Column(BigInteger, default=0)
+    congestion_level = Column(Text,       index=True)
+    data_split       = Column(Text)
 
     __table_args__ = (
-        UniqueConstraint("lat_bin", "lon_bin", "hour_bucket",
-                         name="uq_density_grid_hour"),
-        Index("ix_density_grid",    "lat_bin", "lon_bin"),
-        Index("ix_density_time",    "hour_bucket", "congestion_level"),
+        Index("ix_density_grid", "lat_bin", "lon_bin"),
+        Index("ix_density_time", "hour_bucket", "congestion_level"),
     )
 
 

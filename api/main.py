@@ -234,28 +234,63 @@ def get_density(
     min_vessels: int = 1,
     db = Depends(get_db),
 ):
-    """Grid cell density for heatmap rendering."""
+    """Grid cell density for heatmap rendering.
+
+    Returns one row per unique (lat_bin, lon_bin) grid cell — the peak
+    vessel_count row for that cell across all time buckets.
+    Falls back to all available data when the time window is empty
+    (e.g. the table holds only historical parquet-loaded data).
+    """
     since = datetime.utcnow() - timedelta(hours=hours_back)
-    rows = (
-        db.query(FactTrafficDensity)
-        .filter(FactTrafficDensity.hour_bucket >= since)
-        .filter(FactTrafficDensity.vessel_count >= min_vessels)
-        .order_by(FactTrafficDensity.vessel_count.desc())
-        .limit(1000)
-        .all()
-    )
+
+    # One row per unique (lat_bin, lon_bin) using its peak vessel_count hour.
+    # Balanced across congestion levels: 700 HIGH + 200 MEDIUM + 100 LOW,
+    # so the heatmap renders red/orange/green circles, not just one colour.
+    def _balanced_sql(time_filter: str) -> text:
+        return text(f"""
+            WITH cell_peaks AS (
+                SELECT DISTINCT ON (lat_bin, lon_bin)
+                       lat_bin, lon_bin, vessel_count, avg_sog, congestion_level
+                FROM fact_traffic_density
+                WHERE vessel_count >= :min_vessels {time_filter}
+                ORDER BY lat_bin, lon_bin, vessel_count DESC
+            )
+            (SELECT * FROM cell_peaks WHERE congestion_level = 'HIGH'
+             ORDER BY vessel_count DESC LIMIT 700)
+            UNION ALL
+            (SELECT * FROM cell_peaks WHERE congestion_level = 'MEDIUM'
+             ORDER BY vessel_count DESC LIMIT 200)
+            UNION ALL
+            (SELECT * FROM cell_peaks WHERE congestion_level = 'LOW'
+             ORDER BY vessel_count DESC LIMIT 100)
+        """)
+
+    rows = db.execute(
+        _balanced_sql("AND hour_bucket >= :since"),
+        {"since": since, "min_vessels": min_vessels},
+    ).mappings().all()
+    is_fallback = False
+    if not rows:
+        rows = db.execute(
+            _balanced_sql(""),
+            {"min_vessels": min_vessels},
+        ).mappings().all()
+        is_fallback = True
+
+    max_count = max((r["vessel_count"] for r in rows), default=1)
     return {
         "cells": [
             {
-                "lat":               r.lat_bin,
-                "lon":               r.lon_bin,
-                "vessel_count":      r.vessel_count,
-                "avg_sog":           r.avg_sog,
-                "congestion_level":  r.congestion_level,
-                "weight":            min(r.vessel_count / 20.0, 1.0),
+                "lat":              r["lat_bin"],
+                "lon":              r["lon_bin"],
+                "vessel_count":     r["vessel_count"],
+                "avg_sog":          r["avg_sog"],
+                "congestion_level": r["congestion_level"],
+                "weight":           min(r["vessel_count"] / max_count, 1.0),
             }
             for r in rows
-        ]
+        ],
+        "is_historical_fallback": is_fallback,
     }
 
 

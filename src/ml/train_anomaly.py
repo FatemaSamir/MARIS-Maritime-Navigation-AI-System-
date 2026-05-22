@@ -1,194 +1,135 @@
 """
 train_anomaly.py — Maritime Navigation AI System
-Trains Isolation Forest anomaly detector on Silver TRAIN split.
-Saves model to models/ folder for use by live scorer.
+Trains Isolation Forest anomaly detector on Silver AIS clean data.
+Saves model to models/isolation_forest_v2.pkl.
 
 Run after silver_job.py:
     docker compose exec producer python src/ml/train_anomaly.py
 """
-import os, sys, joblib
+import sys, joblib
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, "/app/src/common")
-from config import (
-    DELTA_SILVER_PATH, MODELS_PATH,
-    ANOMALY_CONTAMINATION,
-)
+from config import MODELS_PATH
 
-FEATURES = [
-    "sog", "cog", "heading",
-    "lat", "lon",
-    "sog_change", "heading_change",
-    "time_delta_sec", "distance_nm",
-    "length", "width", "draft",
-]
+SILVER_PATH = Path("/delta/silver/ais_clean")
 
-RULES_CONFIG = {
-    "sudden_stop_threshold":   5.0,   # sog drops from > this
-    "sharp_turn_threshold":    45.0,  # heading change degrees
-    "speed_max_threshold":     30.0,  # kn
-    "position_jump_threshold": 3.0,   # ratio actual/expected distance
-}
+FEATURES = ["sog", "cog", "heading", "sog_change", "heading_change", "distance_nm"]
 
-def load_train_data() -> pd.DataFrame:
-    """
-    Load train split from Parquet using chunked sampling.
-    Loads max 2 million rows to avoid memory crash.
-    """
-    parquet_path = Path("/app/data/parquet")
-    silver_path  = Path(DELTA_SILVER_PATH)
+CONTAMINATION = 0.002
+N_ESTIMATORS  = 200
 
-    load_path = silver_path if silver_path.exists() else parquet_path
 
-    print(f"📂  Loading from: {load_path}")
+def haversine_nm(lat1, lon1, lat2, lon2) -> np.ndarray:
+    """Return great-circle distance in nautical miles between consecutive points."""
+    R_nm = 3440.065
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    return R_nm * 2 * np.arcsin(np.sqrt(a))
 
-    # Get list of all parquet files
-    if load_path.is_dir():
-        all_files = sorted(load_path.rglob("*.parquet"))
+
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute sog_change, heading_change, distance_nm per vessel track."""
+    df = df.copy()
+
+    ts_col = next((c for c in ("timestamp", "ts", "base_date_time") if c in df.columns), None)
+    if ts_col:
+        df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+        df = df.sort_values(["mmsi", ts_col])
     else:
-        all_files = [load_path]
+        df = df.sort_values("mmsi")
 
-    print(f"    Found {len(all_files)} parquet files")
+    grp = df.groupby("mmsi", sort=False)
 
-    # Load files one by one, keep only train split
-    # Stop when we have enough rows
-    MAX_ROWS   = 2_000_000
-    SAMPLE_PER_FILE = MAX_ROWS // max(len(all_files), 1)
+    df["sog_change"] = grp["sog"].diff().fillna(0)
 
-    chunks = []
-    total  = 0
+    raw_hdg_diff = grp["heading"].diff().fillna(0)
+    df["heading_change"] = ((raw_hdg_diff + 180) % 360 - 180).abs()
+
+    if {"lat", "lon"}.issubset(df.columns):
+        lat1 = grp["lat"].shift(1)
+        lon1 = grp["lon"].shift(1)
+        dist = haversine_nm(
+            lat1.values, lon1.values,
+            df["lat"].values, df["lon"].values,
+        )
+        dist = np.where(lat1.isna(), 0.0, dist)
+        df["distance_nm"] = dist
+    else:
+        df["distance_nm"] = 0.0
+
+    return df
+
+
+def load_silver_data() -> pd.DataFrame:
+    """Load all parquet files from /delta/silver/ais_clean."""
+    if not SILVER_PATH.exists():
+        raise FileNotFoundError(f"Silver path not found: {SILVER_PATH}")
+
+    all_files = sorted(SILVER_PATH.rglob("*.parquet"))
+    if not all_files:
+        raise FileNotFoundError(f"No parquet files under {SILVER_PATH}")
+
+    print(f"Loading from: {SILVER_PATH}  ({len(all_files)} files)")
+
+    MAX_ROWS        = 2_000_000
+    sample_per_file = MAX_ROWS // len(all_files)
+    chunks, total   = [], 0
 
     for f in all_files:
         try:
             chunk = pd.read_parquet(f)
-
-            # Filter train split
             if "data_split" in chunk.columns:
                 chunk = chunk[chunk["data_split"] == "train"]
-
-            if len(chunk) == 0:
+            if chunk.empty:
                 continue
-
-            # Sample to avoid memory issues
-            if len(chunk) > SAMPLE_PER_FILE:
-                chunk = chunk.sample(
-                    n=SAMPLE_PER_FILE, random_state=42
-                )
-
+            if len(chunk) > sample_per_file:
+                chunk = chunk.sample(n=sample_per_file, random_state=42)
             chunks.append(chunk)
             total += len(chunk)
-            print(f"    Loaded {total:,} rows so far...")
-
             if total >= MAX_ROWS:
                 break
-
         except Exception as e:
-            print(f"    Skipping {f.name}: {e}")
-            continue
+            print(f"  Skipping {f.name}: {e}")
 
     if not chunks:
-        raise FileNotFoundError("No train data found in parquet files")
+        raise RuntimeError("No usable train rows found in silver data")
 
     df = pd.concat(chunks, ignore_index=True)
-    print(f"✅  Train data loaded: {len(df):,} rows, "
-          f"{df['mmsi'].nunique():,} vessels")
-    return df
-
-def apply_rule_based_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply rule-based anomaly labels to training data.
-    These become the ground truth for evaluation.
-    """
-    df = df.copy()
-    df["rule_anomaly"] = False
-    df["rule_type"]    = ""
-
-    # Rule 1: Sudden stop
-    if "sog_change" in df.columns:
-        mask = (
-            df["sog_change"].fillna(0) < -RULES_CONFIG["sudden_stop_threshold"]
-        )
-        df.loc[mask, "rule_anomaly"] = True
-        df.loc[mask, "rule_type"]    = "SUDDEN_STOP"
-
-    # Rule 2: Sharp turn at speed
-    if "heading_change" in df.columns:
-        mask = (
-            (df["heading_change"].fillna(0) > RULES_CONFIG["sharp_turn_threshold"]) &
-            (df["sog"] > 2.0)
-        )
-        df.loc[mask, "rule_anomaly"] = True
-        df.loc[mask, "rule_type"]    = "SHARP_TURN"
-
-    # Rule 3: Unusual speed
-    mask = df["sog"] > RULES_CONFIG["speed_max_threshold"]
-    df.loc[mask, "rule_anomaly"] = True
-    df.loc[mask, "rule_type"]    = "UNUSUAL_SPEED"
-
-    # Rule 4: Stationary in Suez zone
-    if "in_suez_zone" in df.columns:
-        mask = (df["sog"] < 0.5) & (df["in_suez_zone"] == True)
-        df.loc[mask, "rule_anomaly"] = True
-        df.loc[mask, "rule_type"]    = "STATIONARY_RISK"
-
-    anomaly_count = df["rule_anomaly"].sum()
-    print(f"    Rule-based anomalies found: {anomaly_count:,} "
-          f"({anomaly_count/len(df)*100:.1f}%)")
-    
-    # Rule 5: AIS signal gap (vessel went silent)
-    if "time_delta_sec" in df.columns:
-        mask = df["time_delta_sec"] > 300  # silent > 5 minutes
-        df.loc[mask, "rule_anomaly"] = True
-        df.loc[mask, "rule_type"]    = "AIS_GAP"
-
-    anomaly_count = df["rule_anomaly"].sum()
+    print(f"Loaded {len(df):,} rows, {df['mmsi'].nunique():,} vessels")
     return df
 
 
 def train_isolation_forest(df: pd.DataFrame):
-    """Train Isolation Forest on feature matrix."""
+    """Train Isolation Forest on the six engineered features."""
     from sklearn.ensemble import IsolationForest
     from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import classification_report
 
-    # Prepare features
     feat_cols = [c for c in FEATURES if c in df.columns]
     X = df[feat_cols].fillna(0).replace([np.inf, -np.inf], 0)
 
-    print(f"\n🔨  Training Isolation Forest")
-    print(f"    Samples  : {len(X):,}")
-    print(f"    Features : {feat_cols}")
-    print(f"    Contamination: {ANOMALY_CONTAMINATION}")
+    print(f"\nTraining Isolation Forest")
+    print(f"  Samples      : {len(X):,}")
+    print(f"  Features     : {feat_cols}")
+    print(f"  Contamination: {CONTAMINATION}")
+    print(f"  n_estimators : {N_ESTIMATORS}")
 
-    scaler = StandardScaler()
+    scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
     model = IsolationForest(
-        contamination=ANOMALY_CONTAMINATION,
-        n_estimators=200,
+        contamination=CONTAMINATION,
+        n_estimators=N_ESTIMATORS,
         max_samples="auto",
         random_state=42,
         n_jobs=-1,
-        verbose=0,
     )
     model.fit(X_scaled)
-
-    # Evaluate against rule-based labels if available
-    if "rule_anomaly" in df.columns:
-        preds = model.predict(X_scaled)
-        # IsolationForest: -1=anomaly, 1=normal
-        pred_binary = (preds == -1)
-        true_binary = df["rule_anomaly"].values
-
-        print(f"\n📊  Evaluation vs rule-based labels:")
-        print(classification_report(
-            true_binary, pred_binary,
-            target_names=["Normal", "Anomaly"],
-            zero_division=0,
-        ))
 
     return model, scaler, feat_cols
 
@@ -196,29 +137,24 @@ def train_isolation_forest(df: pd.DataFrame):
 def main():
     start = datetime.now()
     print("=" * 55)
-    print("  Maritime AI — Anomaly Detector Training")
+    print("  Maritime AI — Anomaly Detector Training v2")
     print("=" * 55)
 
-    # Load data
-    df = load_train_data()
+    df = load_silver_data()
+    df = engineer_features(df)
 
-    # Apply rule-based labels for evaluation
-    df = apply_rule_based_labels(df)
-
-    # Train model
     model, scaler, features = train_isolation_forest(df)
 
-    # Save
-    Path(MODELS_PATH).mkdir(parents=True, exist_ok=True)
-    joblib.dump(model,    f"{MODELS_PATH}/isolation_forest.pkl")
-    joblib.dump(scaler,   f"{MODELS_PATH}/scaler_anomaly.pkl")
-    joblib.dump(features, f"{MODELS_PATH}/anomaly_features.pkl")
-    joblib.dump(RULES_CONFIG, f"{MODELS_PATH}/rules_config.pkl")
+    out = Path(MODELS_PATH)
+    out.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model,    out / "isolation_forest_v2.pkl")
+    joblib.dump(scaler,   out / "scaler_anomaly_v2.pkl")
+    joblib.dump(features, out / "anomaly_features_v2.pkl")
 
     elapsed = (datetime.now() - start).seconds
-    print(f"\n✅  Models saved to {MODELS_PATH}/")
-    print(f"    Training time: {elapsed}s")
-    print(f"\n    Next: python src/ml/train_predictor.py")
+    print(f"\nModels saved to {out}/")
+    print(f"Training time  : {elapsed}s")
+    print(f"\nNext: python src/ml/train_predictor.py")
 
 
 if __name__ == "__main__":

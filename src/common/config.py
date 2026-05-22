@@ -64,11 +64,18 @@ CONGESTION_HIGH         = int(os.getenv("CONGESTION_HIGH",           "15"))
 CONGESTION_MEDIUM       = int(os.getenv("CONGESTION_MEDIUM",         "5"))
 
 # ── Geographic zones ───────────────────────────────────────────────────────────
-SUEZ_ZONE = {
-    "lat_min": 29.5, "lat_max": 31.5,
-    "lon_min": 31.0, "lon_max": 33.5,
-    "name": "Suez Canal",
-}
+US_PORT_ZONES = [
+    {"lat_min": 29.50, "lat_max": 29.85, "lon_min": -95.30, "lon_max": -94.80,
+     "name": "Houston Ship Channel"},
+    {"lat_min": 40.50, "lat_max": 40.75, "lon_min": -74.30, "lon_max": -73.90,
+     "name": "New York Harbor"},
+    {"lat_min": 33.70, "lat_max": 33.85, "lon_min": -118.35, "lon_max": -118.10,
+     "name": "Port of Los Angeles / Long Beach"},
+    {"lat_min": 29.00, "lat_max": 30.00, "lon_min": -90.50, "lon_max": -89.50,
+     "name": "Port of New Orleans"},
+    {"lat_min": 25.70, "lat_max": 25.85, "lon_min": -80.20, "lon_max": -80.05,
+     "name": "Port of Miami"},
+]
 
 US_WATERS = {
     "lat_min": 24.0, "lat_max": 49.0,

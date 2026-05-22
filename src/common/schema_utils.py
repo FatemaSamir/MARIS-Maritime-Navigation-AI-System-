@@ -3,6 +3,7 @@ schema_utils.py — Maritime Navigation AI System
 Handles full MarineCadastre AIS column normalisation.
 Includes geographic utility functions used across all services.
 """
+from __future__ import annotations
 import math
 import pandas as pd
 
@@ -214,17 +215,18 @@ def predict_position_dr(lat: float, lon: float,
 
 
 def classify_risk(sog: float, lat: float, lon: float,
-                  suez_zone: dict = None) -> str:
+                  us_port_zones: list = None) -> str:
     """Classify vessel risk level based on speed and location."""
-    from config import SUEZ_ZONE
-    zone = suez_zone or SUEZ_ZONE
+    from config import US_PORT_ZONES
+    zones = us_port_zones or US_PORT_ZONES
 
-    in_zone = (
-        zone["lat_min"] <= lat <= zone["lat_max"] and
-        zone["lon_min"] <= lon <= zone["lon_max"]
+    in_zone = any(
+        z["lat_min"] <= lat <= z["lat_max"] and
+        z["lon_min"] <= lon <= z["lon_max"]
+        for z in zones
     )
 
-    if sog < 1.0 and in_zone:
+    if sog < 0.5 and in_zone:
         return "HIGH"
     if sog < 2.0:
         return "MEDIUM"

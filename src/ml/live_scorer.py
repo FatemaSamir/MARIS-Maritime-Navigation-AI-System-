@@ -131,6 +131,23 @@ def _process_batch(scorer: LiveScorer, session, messages: list[dict]) -> None:
 
     records = df.to_dict("records")
 
+    # Position prediction for moving vessels (5-min ahead)
+    for r in records:
+        if (r.get("sog") or 0) >= 0.1:
+            try:
+                pred = scorer.predict_position(
+                    lat=float(r.get("lat") or 0),
+                    lon=float(r.get("lon") or 0),
+                    sog=float(r.get("sog") or 0),
+                    cog=float(r.get("cog") or 0),
+                    heading=float(r.get("heading") or r.get("cog") or 0),
+                    minutes=5,
+                )
+                r["predicted_lat"] = pred.get("predicted_lat")
+                r["predicted_lon"] = pred.get("predicted_lon")
+            except Exception:
+                pass
+
     # UPSERT vessel positions
     try:
         _upsert_vessels(session, records)
@@ -143,7 +160,7 @@ def _process_batch(scorer: LiveScorer, session, messages: list[dict]) -> None:
     anomaly_alerts = [
         {
             "alert_type":   r.get("anomaly_type") or "ML_ANOMALY",
-            "severity":     "HIGH" if (r.get("anomaly_score") or 0) >= 0.8 else "MEDIUM",
+            "severity":     "HIGH" if (r.get("anomaly_score") or 0) > 0.7 else "MEDIUM",
             "mmsi":         r.get("mmsi"),
             "vessel_name":  r.get("vessel_name", ""),
             "lat":          r.get("lat"),

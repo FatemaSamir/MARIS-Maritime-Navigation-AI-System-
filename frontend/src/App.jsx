@@ -75,18 +75,23 @@ function useVessels(filters) {
   return { vessels, loading, refetch: fetch_ };
 }
 
+// Polls every 3 s, shows last 1 hour of alerts only
 function useAlerts() {
   const [alerts, setAlerts] = useState([]);
+  const [lastUpdate, setLastUpdate] = useState(null);
   useEffect(() => {
     const load = async () => {
-      const d = await apiFetch("/api/alerts", { hours_back: 24, limit: 100 });
-      if (d) setAlerts(d.alerts || []);
+      const d = await apiFetch("/api/alerts", { hours_back: 1, limit: 100 });
+      if (d) {
+        setAlerts(d.alerts || []);
+        setLastUpdate(new Date());
+      }
     };
     load();
-    const t = setInterval(load, 10000);
+    const t = setInterval(load, 3000);
     return () => clearInterval(t);
   }, []);
-  return alerts;
+  return { alerts, lastUpdate };
 }
 
 function useAnalytics() {
@@ -102,6 +107,63 @@ function useAnalytics() {
   }, []);
   return data;
 }
+
+// ── CriticalBanner ─────────────────────────────────────────────────────────────
+const CriticalBanner = ({ alert, onDismiss }) => {
+  if (!alert) return null;
+  return (
+    <div style={{
+      position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
+      background: "#7f1d1d", borderBottom: "3px solid #EF5350",
+      padding: "12px 24px", display: "flex", alignItems: "center",
+      justifyContent: "space-between", boxShadow: "0 4px 20px rgba(239,83,80,0.4)",
+    }}>
+      <span style={{ color: "#fff", fontWeight: 700, fontSize: 15 }}>
+        ⚠️ COLLISION RISK DETECTED —{" "}
+        <span style={{ color: "#fca5a5" }}>
+          {alert.vessel_1 || alert.mmsi_1}
+        </span>{" "}
+        and{" "}
+        <span style={{ color: "#fca5a5" }}>
+          {alert.vessel_2 || alert.mmsi_2}
+        </span>
+        {alert.distance_nm != null && (
+          <span style={{ fontWeight: 400, fontSize: 13, color: "#fca5a5", marginLeft: 8 }}>
+            ({(alert.distance_nm).toFixed(3)} nm apart)
+          </span>
+        )}
+      </span>
+      <button onClick={onDismiss} style={{
+        background: "none", border: "1px solid #fca5a5",
+        color: "#fca5a5", borderRadius: 4, padding: "4px 12px",
+        cursor: "pointer", fontSize: 13,
+      }}>
+        ✕ Dismiss
+      </button>
+    </div>
+  );
+};
+
+// ── Haversine distance (nautical miles) ───────────────────────────────────────
+const haversineNm = (lat1, lon1, lat2, lon2) => {
+  const R = 3440.065;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+// ── Dead-reckoning: predict position N minutes ahead ─────────────────────────
+const predictPosition = (lat, lon, sogKn, headingDeg, minutes = 5) => {
+  if (!sogKn || sogKn < 0.1) return null;
+  const distNm = sogKn * (minutes / 60);
+  const hdRad = headingDeg * Math.PI / 180;
+  const newLat = lat + (distNm * Math.cos(hdRad)) / 60;
+  const newLon = lon + (distNm * Math.sin(hdRad)) / (60 * Math.cos(lat * Math.PI / 180));
+  return { lat: newLat, lon: newLon };
+};
 
 // ── UI Components ──────────────────────────────────────────────────────────────
 const MetricCard = ({ label, value, color = "#3B82F6", icon, sub }) => (
@@ -137,29 +199,57 @@ const Badge = ({ severity }) => {
   );
 };
 
-const VesselPopup = ({ v }) => (
-  <div style={{ minWidth: 200, fontSize: 13 }}>
-    <b style={{ fontSize: 15 }}>{v.vessel_name || v.mmsi}</b>
-    <table style={{ width: "100%", marginTop: 6, fontSize: 12 }}>
-      <tbody>
-        {[
-          ["MMSI",     v.mmsi],
-          ["Type",     v.vessel_type],
-          ["Speed",    `${(v.sog||0).toFixed(1)} kn`],
-          ["Heading",  `${(v.heading||0).toFixed(0)}°`],
-          ["Risk",     v.risk_level],
-          ["Anomaly",  v.is_anomaly ? `Yes (${v.anomaly_type})` : "No"],
-          ["Updated",  v.updated_at?.slice(0,19)],
-        ].map(([k, val]) => (
-          <tr key={k}>
-            <td style={{ color: "#666", paddingRight: 8, fontWeight: 600 }}>{k}</td>
-            <td>{val || "—"}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  </div>
-);
+const VesselPopup = ({ v }) => {
+  const pred = predictPosition(v.lat, v.lon, v.sog, v.heading || v.cog || 0);
+  const distNm = pred ? haversineNm(v.lat, v.lon, pred.lat, pred.lon) : null;
+  return (
+    <div style={{ minWidth: 210, fontSize: 13 }}>
+      <b style={{ fontSize: 15 }}>{v.vessel_name || v.mmsi}</b>
+      <table style={{ width: "100%", marginTop: 6, fontSize: 12 }}>
+        <tbody>
+          {[
+            ["MMSI",    v.mmsi],
+            ["Type",    v.vessel_type],
+            ["Speed",   `${(v.sog||0).toFixed(1)} kn`],
+            ["Heading", `${(v.heading||0).toFixed(0)}°`],
+            ["Risk",    v.risk_level],
+            ["Anomaly", v.is_anomaly ? `Yes (${v.anomaly_type})` : "No"],
+            ["Updated", v.updated_at?.slice(0,19)],
+          ].map(([k, val]) => (
+            <tr key={k}>
+              <td style={{ color: "#666", paddingRight: 8, fontWeight: 600 }}>{k}</td>
+              <td>{val || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {pred ? (
+        <div style={{ marginTop: 8, borderTop: "1px solid #ddd", paddingTop: 6 }}>
+          <b style={{ fontSize: 12, color: "#555" }}>Predicted Position (5 min)</b>
+          <table style={{ width: "100%", marginTop: 4, fontSize: 12 }}>
+            <tbody>
+              {[
+                ["Lat",      pred.lat.toFixed(5) + "°"],
+                ["Lon",      pred.lon.toFixed(5) + "°"],
+                ["Distance", distNm?.toFixed(3) + " nm"],
+              ].map(([k, val]) => (
+                <tr key={k}>
+                  <td style={{ color: "#666", paddingRight: 8, fontWeight: 600 }}>{k}</td>
+                  <td style={{ color: "#42A5F5" }}>{val}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ marginTop: 8, borderTop: "1px solid #ddd", paddingTop: 6,
+                      fontSize: 11, color: "#999" }}>
+          Predicted Position (5 min): N/A (vessel stationary)
+        </div>
+      )}
+    </div>
+  );
+};
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 const PAGES = [
@@ -173,7 +263,7 @@ const PAGES = [
   { id: "search",   label: "Search",             icon: "🔍" },
 ];
 
-const Sidebar = ({ active, onChange }) => (
+const Sidebar = ({ active, onChange, alertCount }) => (
   <aside style={{
     width: 220, background: "#0D1117",
     borderRight: "1px solid #21262D",
@@ -198,7 +288,18 @@ const Sidebar = ({ active, onChange }) => (
           fontWeight: active === p.id ? 600 : 400,
           transition: "all 0.15s",
         }}>
-        <span>{p.icon}</span> {p.label}
+        <span>{p.icon}</span>
+        <span style={{ flex: 1 }}>{p.label}</span>
+        {p.id === "alerts" && alertCount > 0 && (
+          <span style={{
+            background: "#EF5350", color: "#fff",
+            borderRadius: "50%", minWidth: 18, height: 18,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 10, fontWeight: 700, padding: "0 3px", flexShrink: 0,
+          }}>
+            {alertCount > 99 ? "99+" : alertCount}
+          </span>
+        )}
       </button>
     ))}
   </aside>
@@ -211,6 +312,9 @@ const VesselMapPanel = () => {
   const [filters, setFilters] = useState({ risk_level: "", vessel_type: "" });
   const { vessels, loading } = useVessels({ ...filters, limit: 3000 });
   const [selected, setSelected] = useState(null);
+  const predPos = selected
+    ? predictPosition(selected.lat, selected.lon, selected.sog, selected.heading || selected.cog || 0)
+    : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
@@ -268,6 +372,26 @@ const VesselMapPanel = () => {
               <Popup><VesselPopup v={v} /></Popup>
             </Marker>
           ))}
+          {predPos && selected && (
+            <>
+              <Polyline
+                positions={[[selected.lat, selected.lon], [predPos.lat, predPos.lon]]}
+                pathOptions={{ color: "#42A5F5", weight: 2, dashArray: "6 4", opacity: 0.85 }}
+              />
+              <CircleMarker
+                center={[predPos.lat, predPos.lon]}
+                radius={8}
+                pathOptions={{ color: "#42A5F5", fill: false, weight: 2 }}
+              >
+                <Popup>
+                  <b>Predicted Position (5 min)</b><br />
+                  {selected.vessel_name || selected.mmsi}<br />
+                  {predPos.lat.toFixed(5)}°, {predPos.lon.toFixed(5)}°<br />
+                  {haversineNm(selected.lat, selected.lon, predPos.lat, predPos.lon).toFixed(3)} nm ahead
+                </Popup>
+              </CircleMarker>
+            </>
+          )}
         </MapContainer>
       </div>
     </div>
@@ -277,20 +401,49 @@ const VesselMapPanel = () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PANEL: Historical Replay
 // ═══════════════════════════════════════════════════════════════════════════════
+const DEMO_MMSIS = [
+  { mmsi: "366772760", name: "WSF TACOMA",   note: "avg 7.5 kn" },
+  { mmsi: "366772960", name: "WSF KITTITAS", note: "avg 5.9 kn" },
+  { mmsi: "367104060", name: "ALAN T",       note: "avg 5.3 kn" },
+];
+
+// Fits the Leaflet map to the track bounding box when points change
+const MapFitter = ({ points }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (points && points.length > 1) {
+      const bounds = L.latLngBounds(points.map(p => [p.lat, p.lon]));
+      map.fitBounds(bounds, { padding: [40, 40] });
+    }
+  }, [points, map]);
+  return null;
+};
+
 const ReplayPanel = () => {
-  const [mmsi,    setMmsi]    = useState("");
-  const [track,   setTrack]   = useState([]);
-  const [frame,   setFrame]   = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const [speed,   setSpeed]   = useState(1);
+  const [mmsi,         setMmsi]         = useState("");
+  const [track,        setTrack]        = useState([]);
+  const [frame,        setFrame]        = useState(0);
+  const [playing,      setPlaying]      = useState(false);
+  const [speed,        setSpeed]        = useState(1);
+  const [loadingTrack, setLoadingTrack] = useState(false);
+  const [loaded,       setLoaded]       = useState(false);
   const timer = useRef(null);
 
-  const loadTrack = async () => {
-    const d = await apiFetch(`/api/vessels/${mmsi}/track`, { limit: 5000 });
-    if (d && d.points) {
+  const loadTrack = async (overrideMmsi) => {
+    const target = overrideMmsi || mmsi;
+    if (!target) return;
+    setLoadingTrack(true);
+    setLoaded(false);
+    setPlaying(false);
+    const d = await apiFetch(`/api/vessels/${target}/track`, { limit: 5000 });
+    if (d && d.points && d.points.length > 0) {
       setTrack(d.points);
       setFrame(0);
+    } else {
+      setTrack([]);
     }
+    setLoaded(true);
+    setLoadingTrack(false);
   };
 
   useEffect(() => {
@@ -311,56 +464,99 @@ const ReplayPanel = () => {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
+      {/* Controls */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-        <input style={inputStyle} placeholder="Enter MMSI"
-          value={mmsi} onChange={e => setMmsi(e.target.value)} />
-        <button style={btnStyle} onClick={loadTrack}>Load Track</button>
-        <button style={{ ...btnStyle, background: playing ? "#b45309" : "#166534" }}
-          onClick={() => setPlaying(p => !p)}>
+        <input style={{ ...inputStyle, width: 160 }}
+          placeholder="Enter MMSI e.g. 366772760"
+          value={mmsi}
+          onChange={e => setMmsi(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && loadTrack()} />
+        <button
+          style={{ ...btnStyle, opacity: loadingTrack ? 0.6 : 1 }}
+          onClick={() => loadTrack()}
+          disabled={loadingTrack}>
+          {loadingTrack ? "Loading…" : "Load Track"}
+        </button>
+        <button
+          style={{ ...btnStyle, background: playing ? "#b45309" : "#166534" }}
+          onClick={() => setPlaying(p => !p)}
+          disabled={track.length === 0}>
           {playing ? "⏸ Pause" : "▶ Play"}
         </button>
         <span style={{ color: "#8B949E", fontSize: 13 }}>Speed</span>
         <input type="range" min={1} max={10} value={speed}
           onChange={e => setSpeed(+e.target.value)}
           style={{ width: 80 }} />
-        <span style={{ color: "#fff", fontSize: 13 }}>{speed}x</span>
+        <span style={{ color: "#fff", fontSize: 13 }}>{speed}×</span>
         {track.length > 0 &&
           <span style={{ color: "#8B949E", fontSize: 13 }}>
             Frame {frame + 1}/{track.length}
           </span>}
       </div>
 
+      {/* Empty-state with MMSI hints */}
+      {loaded && track.length === 0 && (
+        <div style={{
+          background: "#161B22", border: "1px solid #30363D",
+          borderRadius: 8, padding: "14px 16px",
+        }}>
+          <p style={{ color: "#FFA726", margin: "0 0 8px", fontWeight: 600 }}>
+            No track data for MMSI {mmsi}.
+          </p>
+          <p style={{ color: "#8B949E", margin: "0 0 10px", fontSize: 13 }}>
+            Try one of these vessels with confirmed movement:
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {DEMO_MMSIS.map(d => (
+              <button key={d.mmsi}
+                style={{ ...btnStyle, background: "#21262D", fontSize: 12 }}
+                onClick={() => { setMmsi(d.mmsi); loadTrack(d.mmsi); }}>
+                {d.mmsi} — {d.name} ({d.note})
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Timeline slider */}
       {track.length > 0 && (
         <input type="range" min={0} max={track.length - 1} value={frame}
           onChange={e => setFrame(+e.target.value)}
           style={{ width: "100%", accentColor: "#3B82F6" }} />
       )}
 
+      {/* Current frame info */}
       {curr && (
         <div style={{ color: "#8B949E", fontSize: 13 }}>
-          🕒 {curr.base_datetime?.slice(0,19)} |
-          📍 ({curr.lat?.toFixed(4)}, {curr.lon?.toFixed(4)}) |
-          💨 {curr.sog?.toFixed(1)} kn |
-          Risk: <span style={{ color: RISK_COLOR[curr.risk_level] }}>
-            {curr.risk_level}
+          🕒 {curr.base_datetime?.slice(0, 19)} |{" "}
+          📍 ({curr.lat?.toFixed(4)}, {curr.lon?.toFixed(4)}) |{" "}
+          💨 {curr.sog?.toFixed(1)} kn |{" "}
+          Risk:{" "}
+          <span style={{ color: RISK_COLOR[curr.risk_level] || "#8B949E" }}>
+            {curr.risk_level || "—"}
           </span>
         </div>
       )}
 
+      {/* Map */}
       <div style={{ flex: 1, borderRadius: 12, overflow: "hidden", minHeight: 420 }}>
-        <MapContainer center={[30.5, 32.3]} zoom={6}
+        <MapContainer center={[40, -95]} zoom={4}
           style={{ height: "100%", width: "100%" }}>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          {/* Auto-fit bounds when track loads */}
+          {track.length > 0 && <MapFitter points={track} />}
+          {/* Full route polyline */}
           {track.length > 0 && (
             <Polyline positions={track.map(p => [p.lat, p.lon])}
               color="#42A5F5" weight={2} opacity={0.6} />
           )}
+          {/* Animated vessel marker */}
           {curr && (
             <CircleMarker center={[curr.lat, curr.lon]}
               radius={12} color="#FF7043" fillColor="#FF7043" fillOpacity={0.9}>
               <Popup>
                 SOG: {curr.sog?.toFixed(1)} kn<br />
-                {curr.base_datetime?.slice(0,19)}
+                {curr.base_datetime?.slice(0, 19)}
               </Popup>
             </CircleMarker>
           )}
@@ -446,20 +642,41 @@ const AnalyticsPanel = () => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PANEL: Alerts
+// PANEL: Alerts  (receives alerts + lastUpdate from App-level useAlerts)
 // ═══════════════════════════════════════════════════════════════════════════════
-const AlertsPanel = () => {
-  const alerts = useAlerts();
+const AlertsPanel = ({ alerts, lastUpdate }) => {
   const resolve = async (id) => {
     await fetch(`${API}/api/alerts/${id}/resolve`, { method: "PATCH" });
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <h2 style={{ color: "#fff", fontSize: 20, fontWeight: 700, margin: 0 }}>
           🔔 Alerts ({alerts.length})
         </h2>
+        {/* Live indicator */}
+        <span style={{
+          display: "flex", alignItems: "center", gap: 5,
+          color: "#3FB950", fontSize: 12, fontWeight: 600,
+        }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: "50%", background: "#3FB950",
+            display: "inline-block", animation: "pulse 2s infinite",
+          }} />
+          LIVE — updating every 3s
+        </span>
+        {lastUpdate && (
+          <span style={{ color: "#6e7681", fontSize: 11 }}>
+            Last: {lastUpdate.toLocaleTimeString()}
+          </span>
+        )}
+        <span style={{ color: "#6e7681", fontSize: 11 }}>
+          Showing last 1 hour
+        </span>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         {["CRITICAL","HIGH","MEDIUM","LOW"].map(s => (
           <MetricCard key={s} label={s}
             value={alerts.filter(a => a.severity === s).length}
@@ -510,7 +727,7 @@ const AlertsPanel = () => {
           </tbody>
         </table>
         {alerts.length === 0 &&
-          <div style={centerStyle}>No alerts ✅</div>}
+          <div style={centerStyle}>No alerts in the last hour ✅</div>}
       </div>
     </div>
   );
@@ -592,57 +809,122 @@ const SearchPanel = () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PANEL: Traffic Heatmap
 // ═══════════════════════════════════════════════════════════════════════════════
+const TIME_OPTS = [
+  { label: "Last 1h",  value: 1  },
+  { label: "Last 6h",  value: 6  },
+  { label: "Last 24h", value: 24 },
+];
+
 const HeatmapPanel = () => {
-  const [cells,   setCells]   = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [cells,      setCells]      = useState([]);
+  const [loading,    setLoading]    = useState(true);
+  const [hoursBack,  setHoursBack]  = useState(24);
+  const [isFallback, setIsFallback] = useState(false);
 
   useEffect(() => {
+    let active = true;
     const load = async () => {
-      const d = await apiFetch("/api/density", { hours_back: 24, min_vessels: 1 });
-      if (d) setCells(d.cells || []);
-      setLoading(false);
+      setLoading(true);
+      const d = await apiFetch("/api/density", { hours_back: hoursBack, min_vessels: 1 });
+      if (d && active) {
+        setCells(d.cells || []);
+        setIsFallback(d.is_historical_fallback || false);
+      }
+      if (active) setLoading(false);
     };
     load();
     const t = setInterval(load, 30000);
-    return () => clearInterval(t);
-  }, []);
+    return () => { active = false; clearInterval(t); };
+  }, [hoursBack]);
 
-  const highZones   = cells.filter(c => c.congestion_level === "HIGH").length;
-  const medZones    = cells.filter(c => c.congestion_level === "MEDIUM").length;
-  const totalShips  = cells.reduce((s, c) => s + (c.vessel_count || 0), 0);
+  const highZones = cells.filter(c => c.congestion_level === "HIGH").length;
+  const medZones  = cells.filter(c => c.congestion_level === "MEDIUM").length;
+  // cells are sorted by vessel_count desc from the API
+  const topCell   = cells.length > 0 ? cells[0] : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
-        <MetricCard label="Grid Cells"    value={cells.length}  icon="📐" />
-        <MetricCard label="HIGH Zones"    value={highZones}     icon="🔴" color="#EF5350" />
-        <MetricCard label="MEDIUM Zones"  value={medZones}      icon="🟡" color="#FFA726" />
-        <MetricCard label="Total Vessels" value={totalShips}    icon="🚢" color="#42A5F5" />
+
+      {/* Time filter */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ color: "#8B949E", fontSize: 13, fontWeight: 600 }}>
+          Time window:
+        </span>
+        {TIME_OPTS.map(opt => (
+          <button key={opt.value}
+            onClick={() => setHoursBack(opt.value)}
+            style={{
+              ...btnStyle,
+              background: hoursBack === opt.value ? "#1F6FEB" : "#21262D",
+              border: `1px solid ${hoursBack === opt.value ? "#1F6FEB" : "#30363D"}`,
+              padding: "5px 14px", fontSize: 12,
+            }}>
+            {opt.label}
+          </button>
+        ))}
+        {isFallback && (
+          <span style={{
+            color: "#FFA726", fontSize: 12,
+            background: "#78350f22", border: "1px solid #78350f",
+            borderRadius: 6, padding: "3px 10px",
+          }}>
+            ⚠️ Showing historical data — no live traffic records yet
+          </span>
+        )}
+        {loading && (
+          <span style={{ color: "#6e7681", fontSize: 12 }}>Loading…</span>
+        )}
       </div>
+
+      {/* Metrics */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
+        <MetricCard
+          label="HIGH Congestion"
+          value={highZones}
+          icon="🔴" color="#EF5350" />
+        <MetricCard
+          label="MEDIUM Congestion"
+          value={medZones}
+          icon="🟡" color="#FFA726" />
+        <MetricCard
+          label="Grid Cells"
+          value={cells.length}
+          icon="📐" />
+        <MetricCard
+          label="Most Congested"
+          value={topCell ? `${topCell.vessel_count.toLocaleString()} vessels` : "—"}
+          sub={topCell ? `${topCell.lat?.toFixed(1)}°, ${topCell.lon?.toFixed(1)}°` : undefined}
+          icon="🏙️" color="#AB47BC" />
+      </div>
+
+      {/* Map */}
       <div style={{ flex: 1, borderRadius: 12, overflow: "hidden", minHeight: 460 }}>
-        <MapContainer center={[30.5, 32.3]} zoom={6}
+        <MapContainer center={[47.5, -122.3]} zoom={6}
           style={{ height: "100%", width: "100%" }}>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           {cells.map((c, i) => (
             <CircleMarker key={i}
               center={[c.lat, c.lon]}
-              radius={Math.max(4, Math.min(28, (c.vessel_count || 1) * 2))}
+              radius={Math.max(4, Math.min(30, Math.sqrt(c.vessel_count || 1) * 1.5))}
               pathOptions={{
                 color: c.congestion_level === "HIGH"   ? "#EF5350"
                      : c.congestion_level === "MEDIUM" ? "#FFA726" : "#42A5F5",
-                fillOpacity: Math.min(0.85, 0.2 + (c.weight || 0) * 0.65),
+                fillColor: c.congestion_level === "HIGH"   ? "#EF5350"
+                         : c.congestion_level === "MEDIUM" ? "#FFA726" : "#42A5F5",
+                fillOpacity: Math.min(0.85, 0.3 + (c.weight || 0) * 0.55),
                 weight: 0,
               }}>
               <Popup>
                 <b>Density Cell</b><br />
-                Vessels: {c.vessel_count}<br />
+                Vessels: {(c.vessel_count || 0).toLocaleString()}<br />
                 Avg Speed: {(c.avg_sog || 0).toFixed(1)} kn<br />
-                Level: {c.congestion_level}
+                Level: <b>{c.congestion_level}</b>
               </Popup>
             </CircleMarker>
           ))}
         </MapContainer>
       </div>
+
       {!loading && cells.length === 0 && (
         <div style={centerStyle}>No density data. Ensure gold_job has run.</div>
       )}
@@ -651,20 +933,33 @@ const HeatmapPanel = () => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PANEL: Anomaly Detection
+// PANEL: Anomaly Detection  (polls every 3s, live indicator, flashes on new)
 // ═══════════════════════════════════════════════════════════════════════════════
 const AnomalyPanel = () => {
   const [anomalies, setAnomalies] = useState([]);
   const [loading,   setLoading]   = useState(true);
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [flash, setFlash] = useState(false);
+  const prevCount = useRef(0);
 
   useEffect(() => {
     const load = async () => {
       const d = await apiFetch("/api/anomalies", { hours_back: 24, limit: 200 });
-      if (d) setAnomalies(d.anomalies || []);
+      if (d) {
+        const next = d.anomalies || [];
+        // Flash red border when new anomalies arrive (skip first load)
+        if (prevCount.current > 0 && next.length > prevCount.current) {
+          setFlash(true);
+          setTimeout(() => setFlash(false), 800);
+        }
+        prevCount.current = next.length;
+        setAnomalies(next);
+        setLastUpdate(new Date());
+      }
       setLoading(false);
     };
     load();
-    const t = setInterval(load, 10000);
+    const t = setInterval(load, 3000);
     return () => clearInterval(t);
   }, []);
 
@@ -675,7 +970,37 @@ const AnomalyPanel = () => {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 12,
+      border: flash ? "2px solid #EF5350" : "2px solid transparent",
+      borderRadius: 10, padding: 2,
+      transition: "border-color 0.15s ease",
+    }}>
+      {/* Live indicator row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <span style={{
+          display: "flex", alignItems: "center", gap: 6,
+          color: "#3FB950", fontSize: 12, fontWeight: 600,
+        }}>
+          <span style={{
+            width: 8, height: 8, borderRadius: "50%", background: "#3FB950",
+            display: "inline-block", animation: "pulse 1.5s infinite",
+          }} />
+          LIVE — updating every 3s
+        </span>
+        {lastUpdate && (
+          <span style={{ color: "#6e7681", fontSize: 11 }}>
+            Last update: {lastUpdate.toLocaleTimeString()}
+          </span>
+        )}
+        {flash && (
+          <span style={{ color: "#EF5350", fontSize: 12, fontWeight: 700,
+                         animation: "pulse 0.5s ease" }}>
+            ● New anomaly detected
+          </span>
+        )}
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
         <MetricCard label="Total Anomalies" value={anomalies.length}                                      icon="⚠️" color="#FFA726" />
         <MetricCard label="HIGH Severity"   value={anomalies.filter(a => a.severity==="HIGH").length}     icon="🔴" color="#EF5350" />
@@ -735,22 +1060,36 @@ const AnomalyPanel = () => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PANEL: Collision Risk
+// PANEL: Collision Risk  (polls every 3s, calls onNewCritical for banner)
 // ═══════════════════════════════════════════════════════════════════════════════
-const CollisionPanel = () => {
+const CollisionPanel = ({ onNewCritical }) => {
   const [risks,   setRisks]   = useState([]);
   const [loading, setLoading] = useState(true);
+  // stable ref so the effect doesn't need to re-run when callback identity changes
+  const onNewCriticalRef = useRef(onNewCritical);
+  useEffect(() => { onNewCriticalRef.current = onNewCritical; }, [onNewCritical]);
+  const seenCriticalIds = useRef(new Set());
 
   useEffect(() => {
     const load = async () => {
       const d = await apiFetch("/api/collision-risks", { hours_back: 6 });
-      if (d) setRisks(d.risks || []);
+      const newRisks = d?.risks || [];
+      setRisks(newRisks);
       setLoading(false);
+
+      // Fire banner for any CRITICAL not seen in previous polls
+      const newCriticals = newRisks.filter(
+        r => r.severity === "CRITICAL" && !seenCriticalIds.current.has(r.id)
+      );
+      if (newCriticals.length > 0) {
+        onNewCriticalRef.current?.(newCriticals[0]);
+      }
+      newRisks.forEach(r => seenCriticalIds.current.add(r.id));
     };
     load();
-    const t = setInterval(load, 10000);
+    const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  }, []);
+  }, []); // empty — uses refs for stable access
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -861,6 +1200,19 @@ export default function App() {
   const [page, setPage] = useState("map");
   const [time, setTime] = useState(new Date());
 
+  // Alerts hoisted here so both Sidebar badge and AlertsPanel share one poll
+  const { alerts, lastUpdate: alertsLastUpdate } = useAlerts();
+  const unresolvedCount = alerts.filter(a => !a.is_resolved).length;
+
+  // CRITICAL collision banner
+  const [criticalBanner, setCriticalBanner] = useState(null);
+  const bannerTimer = useRef(null);
+  const handleNewCritical = useCallback((risk) => {
+    setCriticalBanner(risk);
+    clearTimeout(bannerTimer.current);
+    bannerTimer.current = setTimeout(() => setCriticalBanner(null), 10000);
+  }, []);
+
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(t);
@@ -870,11 +1222,11 @@ export default function App() {
     map:      <VesselMapPanel />,
     replay:   <ReplayPanel />,
     analytics:<AnalyticsPanel />,
-    alerts:   <AlertsPanel />,
+    alerts:   <AlertsPanel alerts={alerts} lastUpdate={alertsLastUpdate} />,
     search:   <SearchPanel />,
     heatmap:  <HeatmapPanel />,
     anomaly:  <AnomalyPanel />,
-    collision:<CollisionPanel />,
+    collision:<CollisionPanel onNewCritical={handleNewCritical} />,
   };
 
   return (
@@ -884,7 +1236,13 @@ export default function App() {
       fontFamily: "'Segoe UI', system-ui, sans-serif",
       overflow: "hidden",
     }}>
-      <Sidebar active={page} onChange={setPage} />
+      {/* Global CRITICAL collision banner — fixed top, auto-dismisses in 10s */}
+      <CriticalBanner
+        alert={criticalBanner}
+        onDismiss={() => { setCriticalBanner(null); clearTimeout(bannerTimer.current); }}
+      />
+
+      <Sidebar active={page} onChange={setPage} alertCount={unresolvedCount} />
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {/* Header */}

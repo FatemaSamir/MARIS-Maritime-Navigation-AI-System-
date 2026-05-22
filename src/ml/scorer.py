@@ -40,9 +40,9 @@ class LiveScorer:
 
         # Anomaly model
         try:
-            self.anomaly_model    = joblib.load(mp / "isolation_forest.pkl")
-            self.anomaly_scaler   = joblib.load(mp / "scaler_anomaly.pkl")
-            self.anomaly_features = joblib.load(mp / "anomaly_features.pkl")
+            self.anomaly_model    = joblib.load(mp / "isolation_forest_v2.pkl")
+            self.anomaly_scaler   = joblib.load(mp / "scaler_anomaly_v2.pkl")
+            self.anomaly_features = joblib.load(mp / "anomaly_features_v2.pkl")
             print("✅  Anomaly model loaded")
         except Exception as e:
             print(f"⚠️   Anomaly model not found: {e}")
@@ -71,12 +71,53 @@ class LiveScorer:
         except Exception as e:
             print(f"⚠️   Congestion model not found: {e}")
 
+    def _compute_delta_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add sog_change, heading_change, distance_nm per vessel if not already present."""
+        need_sog  = "sog_change"    not in df.columns
+        need_hdg  = "heading_change" not in df.columns
+        need_dist = "distance_nm"   not in df.columns
+        if not need_sog and not need_hdg and not need_dist:
+            return df
+
+        df = df.copy()
+        ts_col = next(
+            (c for c in ("timestamp", "ts", "base_date_time") if c in df.columns),
+            None,
+        )
+        if ts_col:
+            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+            df = df.sort_values(["mmsi", ts_col])
+
+        grp = df.groupby("mmsi", sort=False)
+        if need_sog:
+            df["sog_change"] = grp["sog"].diff().fillna(0)
+        if need_hdg:
+            raw_diff = grp["heading"].diff().fillna(0)
+            df["heading_change"] = ((raw_diff + 180) % 360 - 180).abs()
+        if need_dist and {"lat", "lon"}.issubset(df.columns):
+            lat1 = grp["lat"].shift(1)
+            lon1 = grp["lon"].shift(1)
+            valid = ~lat1.isna()
+            R_nm  = 3440.065
+            rlat1 = np.radians(lat1.values)
+            rlat2 = np.radians(df["lat"].values)
+            rlon1 = np.radians(lon1.values)
+            rlon2 = np.radians(df["lon"].values)
+            dlat  = rlat2 - rlat1
+            dlon  = rlon2 - rlon1
+            a = np.sin(dlat / 2) ** 2 + np.cos(rlat1) * np.cos(rlat2) * np.sin(dlon / 2) ** 2
+            dist  = R_nm * 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+            df["distance_nm"] = np.where(valid, dist, 0.0)
+        elif need_dist:
+            df["distance_nm"] = 0.0
+        return df
+
     def score_anomaly(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Score each vessel position for anomaly.
         Adds: is_anomaly, anomaly_score, anomaly_type columns.
         """
-        df = df.copy()
+        df = self._compute_delta_features(df)
         df["is_anomaly"]   = False
         df["anomaly_score"] = 0.0
         df["anomaly_type"]  = ""
@@ -103,9 +144,9 @@ class LiveScorer:
                 (df.loc[mask, "heading_change"] / 180).clip(0, 1)
             df.loc[mask, "anomaly_type"]  = "SHARP_TURN"
 
-        # Stationary in high-traffic zone
-        if "in_suez_zone" in df.columns:
-            mask = (df["sog"] < 0.5) & (df["in_suez_zone"] == True)
+        # Stationary inside US port geofences or restricted shipping channels
+        if "in_us_port_zone" in df.columns:
+            mask = (df["sog"] < 0.5) & (df["in_us_port_zone"] == True)
             df.loc[mask, "is_anomaly"]    = True
             df.loc[mask, "anomaly_score"]  = 0.9
             df.loc[mask, "anomaly_type"]   = "STATIONARY_RISK"
@@ -181,6 +222,8 @@ class LiveScorer:
         Detect collision risks between nearby vessels.
         Returns list of alert dicts.
         """
+        _THRESHOLD_NM = 0.1   # main detection radius
+
         risks   = []
         vessels = df.to_dict("records")
 
@@ -194,8 +237,12 @@ class LiveScorer:
                     v2["lat"], v2["lon"]
                 )
 
-                if dist > COLLISION_DISTANCE_NM * 10:
+                if dist > _THRESHOLD_NM * 10:
                     continue  # skip distant pairs
+
+                # Both vessels must be underway
+                if v1.get("sog", 0) <= 1.0 or v2.get("sog", 0) <= 1.0:
+                    continue
 
                 # Check convergence
                 bearing = bearing_degrees(
@@ -205,14 +252,14 @@ class LiveScorer:
                 h_diff = abs(v1.get("heading", 0) - bearing)
                 if h_diff > 180:
                     h_diff = 360 - h_diff
-                converging = h_diff < 45 and v1.get("sog", 0) > 1.0
+                converging = h_diff < 45
 
-                # Classify risk
-                if dist < 0.1:
+                # Classify risk within the 0.1 nm detection zone
+                if dist < _THRESHOLD_NM * 0.5:   # < 0.05 nm
                     severity = "CRITICAL"
-                elif dist < COLLISION_DISTANCE_NM and converging:
+                elif dist < _THRESHOLD_NM and converging:
                     severity = "HIGH"
-                elif dist < COLLISION_DISTANCE_NM:
+                elif dist < _THRESHOLD_NM:
                     severity = "MEDIUM"
                 else:
                     continue

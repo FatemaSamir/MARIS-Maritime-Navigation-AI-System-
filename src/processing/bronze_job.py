@@ -1,7 +1,7 @@
 """
 bronze_job.py — Maritime Navigation AI System
 Loads converted Parquet files into Bronze Delta Lake.
-Adds enrichment: risk flags, Suez zone, speed flags.
+Adds enrichment: risk flags, US Coastal Zones / Port Channels, speed flags.
 
 Run after convert_csv.py:
     docker compose exec spark-master \
@@ -14,9 +14,11 @@ sys.path.insert(0, "/opt/spark/app/src/common")
 
 from config import (
     SPARK_MASTER, PARQUET_DATA_PATH,
-    DELTA_BRONZE_PATH, SUEZ_ZONE,
+    DELTA_BRONZE_PATH, US_PORT_ZONES,
     ANOMALY_SPEED_MAX,
 )
+from functools import reduce
+from operator import or_ as _or
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, current_timestamp, when,
@@ -61,20 +63,21 @@ def enrich(df):
         .withColumn("is_slow",     col("sog") < 2.0)
         .withColumn("is_speeding", col("sog") > lit(ANOMALY_SPEED_MAX))
 
-        # Suez Canal zone flag
+        # US Coastal Zones / Port Channels flag
         .withColumn(
-            "in_suez_zone",
-            col("lat").between(SUEZ_ZONE["lat_min"],
-                               SUEZ_ZONE["lat_max"]) &
-            col("lon").between(SUEZ_ZONE["lon_min"],
-                               SUEZ_ZONE["lon_max"])
+            "in_us_port_zone",
+            reduce(_or, [
+                col("lat").between(z["lat_min"], z["lat_max"]) &
+                col("lon").between(z["lon_min"], z["lon_max"])
+                for z in US_PORT_ZONES
+            ])
         )
 
         # Risk level — rule-based baseline before ML models exist
         .withColumn(
             "risk_level",
             when(
-                (col("sog") < 1.0) & col("in_suez_zone"), "HIGH"
+                (col("sog") < 0.5) & col("in_us_port_zone"), "HIGH"
             ).when(
                 col("sog") < 2.0, "MEDIUM"
             ).otherwise("LOW")

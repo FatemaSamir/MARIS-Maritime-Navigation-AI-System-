@@ -12,8 +12,10 @@ sys.path.insert(0, "/opt/spark/app/src/common")
 from config import (
     KAFKA_BOOTSTRAP_SERVERS, AIS_TOPIC,
     DELTA_BRONZE_PATH, CHECKPOINT_BRONZE,
-    SPARK_MASTER, SUEZ_ZONE, ANOMALY_SPEED_MAX,
+    SPARK_MASTER, US_PORT_ZONES, ANOMALY_SPEED_MAX,
 )
+from functools import reduce
+from operator import or_ as _or
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, current_timestamp, to_timestamp,
@@ -71,16 +73,17 @@ def enrich(df):
         .withColumn("is_slow",     col("sog") < 2.0)
         .withColumn("is_speeding", col("sog") > lit(ANOMALY_SPEED_MAX))
         .withColumn(
-            "in_suez_zone",
-            col("lat").between(SUEZ_ZONE["lat_min"],
-                               SUEZ_ZONE["lat_max"]) &
-            col("lon").between(SUEZ_ZONE["lon_min"],
-                               SUEZ_ZONE["lon_max"])
+            "in_us_port_zone",
+            reduce(_or, [
+                col("lat").between(z["lat_min"], z["lat_max"]) &
+                col("lon").between(z["lon_min"], z["lon_max"])
+                for z in US_PORT_ZONES
+            ])
         )
         .withColumn(
             "risk_level",
             when(
-                (col("sog") < 1.0) & col("in_suez_zone"), "HIGH"
+                (col("sog") < 0.5) & col("in_us_port_zone"), "HIGH"
             ).when(col("sog") < 2.0, "MEDIUM")
              .otherwise("LOW")
         )
