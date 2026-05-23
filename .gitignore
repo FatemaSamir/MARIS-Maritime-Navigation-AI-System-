@@ -1,58 +1,85 @@
-# Large data files
+# =========================
+# Large Data Files
+# =========================
 *.csv
 *.zst
 *.parquet
 *.json.gz
+
 data/
 raw/
 bronze/
 silver/
 gold/
 
+# =========================
 # Python
+# =========================
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+
 .venv/
 venv/
 env/
-*.egg-info/
 
+*.egg-info/
+.pytest_cache/
+
+# =========================
 # Node / React
+# =========================
 node_modules/
 build/
 dist/
+
 frontend/node_modules/
 frontend/build/
 
-# Environment & secrets
+# =========================
+# Environment & Secrets
+# =========================
 .env
 .env.*
 *.env
 
-# Docker volumes
+# =========================
+# Docker Volumes
+# =========================
 volumes/
 postgres_data/
 
+# =========================
 # Jupyter
+# =========================
 .ipynb_checkpoints/
 
+# =========================
 # IDE
+# =========================
 .vscode/
 .idea/
+.claude/
 
+# =========================
 # OS
+# =========================
 .DS_Store
 Thumbs.db
 
-# ML models (if large)
-*.pkl
-*.joblib
+# =========================
+# ML Training Artifacts
+# =========================
+mlruns/
+artifacts/
+checkpoints/
+
+# Optional large training outputs
 *.h5
-*.model
-data/
-models/
-*.csv
-*.zst
-*.parquet
-*.pkl
+*.joblib
+
+# =========================
+# Logs
+# =========================
+*.log
