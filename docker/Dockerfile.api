@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir --timeout=120 --retries=5 pandas==2.2.2
 RUN pip install --no-cache-dir --timeout=120 --retries=5 numpy==1.26.4
 RUN pip install --no-cache-dir --timeout=120 --retries=5 scikit-learn==1.5.1
 RUN pip install --no-cache-dir --timeout=120 --retries=5 joblib==1.4.2
-RUN pip install --no-cache-dir xgboost==2.0.3
+RUN pip install --no-cache-dir --timeout=300 --retries=10 xgboost==2.1.1
 RUN pip install --no-cache-dir --timeout=120 --retries=5 kafka-python==2.0.2
 COPY ./src  /app/src
 COPY ./api  /app/api

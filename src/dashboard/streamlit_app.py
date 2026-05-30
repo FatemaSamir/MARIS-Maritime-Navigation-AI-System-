@@ -3,8 +3,9 @@ streamlit_app.py — Maritime Navigation AI System
 Complete dashboard with all 10 features.
 Reads from PostgreSQL (Star Schema) + Kafka live feed.
 """
-import json, math, os, sys, random, uuid
+import json, math, os, re, sys, random, uuid
 from datetime import datetime, timedelta
+
 
 import pandas as pd
 import plotly.express as px
@@ -65,7 +66,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st_autorefresh(interval=DASHBOARD_REFRESH_SEC * 1000, key="main_refresh")
+st_autorefresh(interval=8000, key="main_refresh")
 
 RISK_COLORS = {"HIGH": "#EF5350", "MEDIUM": "#FFA726", "LOW": "#66BB6A"}
 DEMO_SHIP_TYPES = ["Cargo","Tanker","Passenger","Fishing","Tug","Military","Sailing"]
@@ -98,14 +99,16 @@ def _init(k, v):
     if k not in st.session_state:
         st.session_state[k] = v
 
-_init("session_id",       str(uuid.uuid4())[:8])
-_init("vessel_store",     {})
-_init("vessel_history",   {})
-_init("total_consumed",   0)
-_init("partition_offsets",{})
-_init("demo_mode",        False)
-_init("demo_vessels",     {})
-_init("alerts_store",     [])
+_init("session_id",         str(uuid.uuid4())[:8])
+_init("vessels",            {})          # keyed by mmsi — persists across refreshes
+_init("vessel_history",     {})
+_init("total_consumed",     0)
+_init("partition_offsets",  {})
+_init("demo_mode",          False)
+_init("demo_vessels",       {})
+_init("alerts_store",       [])
+_init("_kafka_consumer",    None)        # cached consumer object
+_init("_kafka_consumer_ts", 0.0)        # unix timestamp of last (re)connect
 
 
 # ── PostgreSQL reader ──────────────────────────────────────────────────────────
@@ -124,9 +127,22 @@ def read_pg(query: str, params: dict = None) -> pd.DataFrame:
 
 
 # ── Kafka consumer ─────────────────────────────────────────────────────────────
-def read_kafka_batch() -> list:
+def _get_or_create_consumer():
+    """Return a cached KafkaConsumer; reconnect only when the handle is missing or > 30 s old."""
+    import time
+    from kafka import KafkaConsumer
+    now = time.time()
+    consumer = st.session_state["_kafka_consumer"]
+    ts       = st.session_state["_kafka_consumer_ts"]
+    if consumer is not None and (now - ts) < 30:
+        return consumer
+    if consumer is not None:
+        try:
+            consumer.close()
+        except Exception:
+            pass
+        st.session_state["_kafka_consumer"] = None
     try:
-        from kafka import KafkaConsumer, TopicPartition
         consumer = KafkaConsumer(
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             value_deserializer=lambda m: json.loads(m.decode("utf-8")),
@@ -134,9 +150,26 @@ def read_kafka_batch() -> list:
             max_poll_records=300,
             session_timeout_ms=30000,
         )
+        st.session_state["_kafka_consumer"]    = consumer
+        st.session_state["_kafka_consumer_ts"] = now
+        return consumer
+    except Exception:
+        return None
+
+
+def read_kafka_batch() -> list:
+    try:
+        from kafka import TopicPartition
+        consumer = _get_or_create_consumer()
+        if consumer is None:
+            # Only switch to demo when there are no stored vessels to show
+            if not st.session_state["vessels"]:
+                st.session_state["demo_mode"] = True
+            return []
         parts = consumer.partitions_for_topic(AIS_TOPIC)
         if not parts:
-            consumer.close()
+            if not st.session_state["vessels"]:
+                st.session_state["demo_mode"] = True
             return []
         tps = [TopicPartition(AIS_TOPIC, p) for p in sorted(parts)]
         consumer.assign(tps)
@@ -152,12 +185,15 @@ def read_kafka_batch() -> list:
             st.session_state.partition_offsets[msg.partition] = msg.offset + 1
             if len(records) >= 300:
                 break
-        consumer.close()
         if records:
             st.session_state["demo_mode"] = False
         return records
     except Exception:
-        st.session_state["demo_mode"] = True
+        # Invalidate stale consumer so next call reconnects
+        st.session_state["_kafka_consumer"]    = None
+        st.session_state["_kafka_consumer_ts"] = 0.0
+        if not st.session_state["vessels"]:
+            st.session_state["demo_mode"] = True
         return []
 
 
@@ -201,15 +237,15 @@ def merge_records(records: list):
         mmsi = str(rec.get("mmsi", "")).strip()
         if not mmsi:
             continue
-        st.session_state.vessel_store[mmsi] = rec
+        st.session_state["vessels"][mmsi] = rec
         st.session_state.vessel_history.setdefault(mmsi, []).append(rec)
     st.session_state.total_consumed += len(records)
 
 
 def store_to_df() -> pd.DataFrame:
-    if not st.session_state.vessel_store:
+    if not st.session_state["vessels"]:
         return pd.DataFrame()
-    df = pd.DataFrame(st.session_state.vessel_store.values())
+    df = pd.DataFrame(st.session_state["vessels"].values())
     for c in ["lat","lon","sog","cog","heading"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -274,12 +310,14 @@ with st.sidebar:
 
     st.divider()
     st.caption(f"Session: `{st.session_state.session_id}`")
-    st.caption(f"Vessels: `{len(st.session_state.vessel_store)}`")
+    st.caption(f"Vessels: `{len(st.session_state['vessels'])}`")
     st.caption(f"Records: `{st.session_state.total_consumed:,}`")
     if st.button("🗑️ Reset"):
-        for k in ["vessel_store","vessel_history","partition_offsets",
+        for k in ["vessels","vessel_history","partition_offsets",
                   "demo_vessels","total_consumed","alerts_store"]:
             st.session_state[k] = {} if k != "total_consumed" else 0
+        st.session_state["_kafka_consumer"]    = None
+        st.session_state["_kafka_consumer_ts"] = 0.0
         st.rerun()
 
 
@@ -323,8 +361,18 @@ if "Live Vessel Map" in page:
 
         st.divider()
 
-    if not filtered.empty and {"lat","lon"}.issubset(filtered.columns):
-        map_df = filtered.dropna(subset=["lat","lon"]).copy()
+    # Build map from vessel_store (one entry per MMSI = latest position only).
+    # Do NOT use vessel_history here — that accumulates all historical pings.
+    _store = st.session_state["vessels"]
+    map_df = pd.DataFrame(_store.values()) if _store else pd.DataFrame()
+    map_df = apply_filters(map_df) if not map_df.empty else map_df
+
+    if not map_df.empty and {"lat","lon"}.issubset(map_df.columns):
+        map_df = map_df.dropna(subset=["lat","lon"])
+        for c in ["lat","lon","sog","cog","heading"]:
+            if c in map_df.columns:
+                map_df[c] = pd.to_numeric(map_df[c], errors="coerce")
+        map_df = map_df.dropna(subset=["lat","lon"])
         latest = map_df.drop_duplicates("mmsi", keep="last").rename(
             columns={"lat":"latitude","lon":"longitude"})
 
@@ -366,9 +414,9 @@ elif "Historical Replay" in page:
     st.title("⏮️ Historical Replay")
 
     _TOP_MMSIS = [
-        ("366772760", "WSF TACOMA",   "avg 7.5 kn, 304 pts"),
-        ("366772960", "WSF KITTITAS", "avg 5.9 kn, 305 pts"),
-        ("367104060", "ALAN T",       "avg 5.3 kn, 306 pts"),
+        ("366082000", "OVERSEAS SUN COAST", "276 records, ~2080 nm"),
+        ("367060370", "EVEY T",             "217 records, ~1200 nm"),
+        ("368530000", "C HERO",             "180 records, ~2335 nm"),
     ]
 
     col1, col2 = st.columns([3, 1])
@@ -409,7 +457,9 @@ elif "Historical Replay" in page:
 
             frame = st.slider("Timeline", 0, max(len(tdf) - 1, 1),
                               max(len(tdf) - 1, 1))
-            curr = tdf.iloc[frame]
+            curr      = tdf.iloc[frame]
+            first_lat = float(tdf["lat"].iloc[0])
+            first_lon = float(tdf["lon"].iloc[0])
 
             s1, s2, s3, s4 = st.columns(4)
             s1.metric("Frame",   f"{frame + 1}/{len(tdf)}")
@@ -432,8 +482,7 @@ elif "Historical Replay" in page:
             fig.update_layout(
                 mapbox=dict(
                     style="open-street-map",
-                    center=dict(lat=float(curr["lat"]),
-                                lon=float(curr["lon"])),
+                    center=dict(lat=first_lat, lon=first_lon),
                     zoom=9,
                 ),
                 margin={"r": 0, "t": 0, "l": 0, "b": 0},
@@ -763,7 +812,7 @@ elif "Analytics" in page:
     # KPIs
     k1,k2,k3,k4 = st.columns(4)
     k1.metric("Live Vessels",   f"{len(data):,}")
-    k2.metric("Unique Tracked", f"{len(st.session_state.vessel_store):,}")
+    k2.metric("Unique Tracked", f"{len(st.session_state['vessels']):,}")
     k3.metric("Total Records",  f"{st.session_state.total_consumed:,}")
     if not data.empty and "sog" in data.columns:
         k4.metric("Avg SOG", f"{data['sog'].mean():.1f} kn")

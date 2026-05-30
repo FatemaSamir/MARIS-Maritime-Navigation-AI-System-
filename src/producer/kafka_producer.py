@@ -149,6 +149,8 @@ def main():
         if not LOOP:
             break
 
+        print(f"Loop #{run} complete — restarting from beginning")
+
     producer.close()
     print("Producer shut down.")
 

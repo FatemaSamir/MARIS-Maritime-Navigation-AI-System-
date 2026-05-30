@@ -160,7 +160,7 @@ def _process_batch(scorer: LiveScorer, session, messages: list[dict]) -> None:
     anomaly_alerts = [
         {
             "alert_type":   r.get("anomaly_type") or "ML_ANOMALY",
-            "severity":     "HIGH" if (r.get("anomaly_score") or 0) > 0.7 else "MEDIUM",
+            "severity":     "HIGH" if (r.get("anomaly_score") or 0) >= 0.7 else "MEDIUM" if (r.get("anomaly_score") or 0) >= 0.5 else "LOW",
             "mmsi":         r.get("mmsi"),
             "vessel_name":  r.get("vessel_name", ""),
             "lat":          r.get("lat"),
@@ -174,8 +174,9 @@ def _process_batch(scorer: LiveScorer, session, messages: list[dict]) -> None:
         for r in records if r.get("is_anomaly")
     ]
 
-    # Collision detection on moving vessels (cap at 300 for performance)
-    moving = df[df["sog"] > 0.5]
+    # Collision detection: one row per vessel, moving only, capped for performance
+    latest = df.drop_duplicates("mmsi", keep="last")
+    moving = latest[latest["sog"] >= 1.0]
     if len(moving) > 300:
         moving = moving.sample(300, random_state=42)
     collision_alerts = scorer.detect_collisions(moving) if len(moving) > 1 else []

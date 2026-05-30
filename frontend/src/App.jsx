@@ -209,7 +209,7 @@ const VesselPopup = ({ v }) => {
         <tbody>
           {[
             ["MMSI",    v.mmsi],
-            ["Type",    v.vessel_type],
+            ["Type", v.vessel_type_label],
             ["Speed",   `${(v.sog||0).toFixed(1)} kn`],
             ["Heading", `${(v.heading||0).toFixed(0)}°`],
             ["Risk",    v.risk_level],
@@ -402,18 +402,17 @@ const VesselMapPanel = () => {
 // PANEL: Historical Replay
 // ═══════════════════════════════════════════════════════════════════════════════
 const DEMO_MMSIS = [
-  { mmsi: "366772760", name: "WSF TACOMA",   note: "avg 7.5 kn" },
-  { mmsi: "366772960", name: "WSF KITTITAS", note: "avg 5.9 kn" },
-  { mmsi: "367104060", name: "ALAN T",       note: "avg 5.3 kn" },
+  { mmsi: "366082000", name: "OVERSEAS SUN COAST", note: "276 records, ~2080 nm" },
+  { mmsi: "367060370", name: "EVEY T",             note: "217 records, ~1200 nm" },
+  { mmsi: "368530000", name: "C HERO",             note: "180 records, ~2335 nm" },
 ];
 
-// Fits the Leaflet map to the track bounding box when points change
-const MapFitter = ({ points }) => {
+// Smooth flyTo the track's first point at zoom 10 when the track changes
+const MapFlyTo = ({ points }) => {
   const map = useMap();
   useEffect(() => {
-    if (points && points.length > 1) {
-      const bounds = L.latLngBounds(points.map(p => [p.lat, p.lon]));
-      map.fitBounds(bounds, { padding: [40, 40] });
+    if (points && points.length > 0) {
+      map.flyTo([points[0].lat, points[0].lon], 10);
     }
   }, [points, map]);
   return null;
@@ -467,7 +466,7 @@ const ReplayPanel = () => {
       {/* Controls */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
         <input style={{ ...inputStyle, width: 160 }}
-          placeholder="Enter MMSI e.g. 366772760"
+          placeholder="Enter MMSI e.g. 366082000"
           value={mmsi}
           onChange={e => setMmsi(e.target.value)}
           onKeyDown={e => e.key === "Enter" && loadTrack()} />
@@ -540,11 +539,13 @@ const ReplayPanel = () => {
 
       {/* Map */}
       <div style={{ flex: 1, borderRadius: 12, overflow: "hidden", minHeight: 420 }}>
-        <MapContainer center={[40, -95]} zoom={4}
+        <MapContainer
+          center={track.length > 0 ? [track[0].lat, track[0].lon] : [38.5, -95.0]}
+          zoom={track.length > 0 ? 10 : 4}
           style={{ height: "100%", width: "100%" }}>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-          {/* Auto-fit bounds when track loads */}
-          {track.length > 0 && <MapFitter points={track} />}
+          {/* Fly to first track point (zoom 10) whenever a new track loads */}
+          {track.length > 0 && <MapFlyTo points={track} />}
           {/* Full route polyline */}
           {track.length > 0 && (
             <Polyline positions={track.map(p => [p.lat, p.lon])}
@@ -784,7 +785,7 @@ const SearchPanel = () => {
                     {v.mmsi}
                   </td>
                   <td style={tdStyle}>{v.vessel_name || "—"}</td>
-                  <td style={tdStyle}>{v.vessel_type || "—"}</td>
+                  <td style={tdStyle}>{v.vessel_type_label || "—"}</td>
                   <td style={tdStyle}>{(v.sog||0).toFixed(1)} kn</td>
                   <td style={tdStyle}>
                     <span style={{ color: RISK_COLOR[v.risk_level] }}>
@@ -813,12 +814,13 @@ const TIME_OPTS = [
   { label: "Last 1h",  value: 1  },
   { label: "Last 6h",  value: 6  },
   { label: "Last 24h", value: 24 },
+  { label: "All Historical", value: 10000 }
 ];
 
 const HeatmapPanel = () => {
   const [cells,      setCells]      = useState([]);
   const [loading,    setLoading]    = useState(true);
-  const [hoursBack,  setHoursBack]  = useState(24);
+  const [hoursBack,  setHoursBack]  = useState(10000);
   const [isFallback, setIsFallback] = useState(false);
 
   useEffect(() => {
@@ -868,7 +870,7 @@ const HeatmapPanel = () => {
             background: "#78350f22", border: "1px solid #78350f",
             borderRadius: 6, padding: "3px 10px",
           }}>
-            ⚠️ Showing historical data — no live traffic records yet
+            Showing historical AIS data for demo
           </span>
         )}
         {loading && (

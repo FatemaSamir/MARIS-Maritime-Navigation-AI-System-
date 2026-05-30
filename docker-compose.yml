@@ -260,7 +260,13 @@ services:
         limits:
           memory: 2g
           cpus: '2.0'
-    command: tail -f /dev/null
+    restart: unless-stopped
+    command: >
+      bash -c "while true; do
+        python src/producer/kafka_producer.py;
+        echo 'Producer crashed, restarting in 5s...';
+        sleep 5;
+      done"
 
   api:
     build:

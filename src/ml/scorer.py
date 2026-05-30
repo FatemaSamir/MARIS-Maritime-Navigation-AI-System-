@@ -224,25 +224,27 @@ class LiveScorer:
         """
         _THRESHOLD_NM = 0.1   # main detection radius
 
-        risks   = []
-        vessels = df.to_dict("records")
+        risks  = []
+        latest = df.drop_duplicates("mmsi", keep="last")
 
-        for i in range(len(vessels)):
-            for j in range(i + 1, len(vessels)):
-                v1 = vessels[i]
-                v2 = vessels[j]
+        for i, v1 in latest.iterrows():
+            for j, v2 in latest.iterrows():
+                if i >= j:
+                    continue                           # avoid duplicates / self
+                if str(v1["mmsi"]) == str(v2["mmsi"]):
+                    continue                           # same vessel guard
+                if v1.get("sog", 0) < 1.0 or v2.get("sog", 0) < 1.0:
+                    continue                           # skip stationary vessels
 
                 dist = haversine_nm(
                     v1["lat"], v1["lon"],
                     v2["lat"], v2["lon"]
                 )
 
+                if dist == 0.0:
+                    continue                           # exact same position — bad data
                 if dist > _THRESHOLD_NM * 10:
-                    continue  # skip distant pairs
-
-                # Both vessels must be underway
-                if v1.get("sog", 0) <= 1.0 or v2.get("sog", 0) <= 1.0:
-                    continue
+                    continue                           # skip distant pairs
 
                 # Check convergence
                 bearing = bearing_degrees(

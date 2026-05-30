@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timedelta
 import json, sys, os
+from utils.vessel_types import vessel_label
 
 sys.path.insert(0, "/app/src")
 sys.path.insert(0, "/app/api")
@@ -92,6 +93,7 @@ def get_vessels(
                 "mmsi":          v.mmsi,
                 "vessel_name":   v.vessel_name,
                 "vessel_type":   v.vessel_type,
+                "vessel_type_label": vessel_label(v.vessel_type),
                 "lat":           v.lat,
                 "lon":           v.lon,
                 "sog":           v.sog,
@@ -276,6 +278,41 @@ def get_density(
             {"min_vessels": min_vessels},
         ).mappings().all()
         is_fallback = True
+
+    # Third fallback: aggregate from fact_ais_track when fact_traffic_density
+    # has no data at all (table empty / gold_job not yet run).
+    if not rows:
+        ais_rows = db.execute(text("""
+            SELECT
+                ROUND(lat::numeric, 1) AS lat_bin,
+                ROUND(lon::numeric, 1) AS lon_bin,
+                COUNT(*)               AS vessel_count,
+                AVG(sog)               AS avg_sog
+            FROM fact_ais_track
+            GROUP BY 1, 2
+            ORDER BY vessel_count DESC
+            LIMIT 1000
+        """)).mappings().all()
+        if ais_rows:
+            _mx = max((r["vessel_count"] for r in ais_rows), default=1)
+            def _cong(n):
+                if n >= 10000: return "HIGH"
+                if n >= 1000:  return "MEDIUM"
+                return "LOW"
+            return {
+                "cells": [
+                    {
+                        "lat":              float(r["lat_bin"]),
+                        "lon":              float(r["lon_bin"]),
+                        "vessel_count":     int(r["vessel_count"]),
+                        "avg_sog":          float(r["avg_sog"] or 0),
+                        "congestion_level": _cong(int(r["vessel_count"])),
+                        "weight":           min(int(r["vessel_count"]) / _mx, 1.0),
+                    }
+                    for r in ais_rows
+                ],
+                "is_historical_fallback": True,
+            }
 
     max_count = max((r["vessel_count"] for r in rows), default=1)
     return {
