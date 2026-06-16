@@ -83,3 +83,29 @@ checkpoints/
 # Logs
 # =========================
 *.log
+# Data / generated files
+data/
+delta/
+*.csv
+*.parquet
+*.db
+metastore_db/
+src/metastore_db/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+airflow/logs/
+
+# Large model artifacts
+models/*.pkl
+models/*.joblib
+
+# Database backups
+*.sql
+*.sql.gz
+.github/workflows/
+.github/workflows/

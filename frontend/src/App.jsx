@@ -27,6 +27,18 @@ const CHART_COLORS = [
   "#FFA726","#8D6E63","#26C6DA","#D4E157",
 ];
 
+// API stores vessel_type as AIS numeric codes like "70.0", not labels like "Cargo".
+const VESSEL_TYPE_OPTIONS = [
+  { value: "70.0", label: "Cargo" },
+  { value: "80.0", label: "Tanker" },
+  { value: "60.0", label: "Passenger" },
+  { value: "30.0", label: "Fishing" },
+  { value: "37.0", label: "Pleasure Craft" },
+  { value: "52.0", label: "Towing / Tug" },
+  { value: "35.0", label: "Military" },
+  { value: "36.0", label: "Sailing" },
+];
+
 // Vessel icon rotated by heading
 const makeVesselIcon = (heading, color) => {
   const svg = `
@@ -47,9 +59,27 @@ const makeVesselIcon = (heading, color) => {
 async function apiFetch(path, params = {}) {
   try {
     const url = new URL(`${API}${path}`);
-    Object.entries(params).forEach(([k, v]) =>
-      v !== undefined && v !== "" && url.searchParams.set(k, v));
+
+    Object.entries(params).forEach(([k, v]) => {
+      if (
+        v !== undefined &&
+        v !== null &&
+        v !== "" &&
+        v !== "All" &&
+        v !== "All Types"
+      ) {
+        url.searchParams.set(k, v);
+      }
+    });
+
+    console.log("Fetching:", url.toString());
+
     const res = await fetch(url);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
     return await res.json();
   } catch (e) {
     console.error(`API error [${path}]:`, e);
@@ -61,9 +91,17 @@ async function apiFetch(path, params = {}) {
 function useVessels(filters) {
   const [vessels, setVessels] = useState([]);
   const [loading, setLoading] = useState(true);
+
   const fetch_ = useCallback(async () => {
     const data = await apiFetch("/api/vessels", filters);
-    if (data) setVessels(data.vessels || []);
+
+    if (data) {
+      const parsedVessels = data.vessels || [];
+      console.log("Vessels response count:", data.count);
+      console.log("Parsed vessels length:", parsedVessels.length);
+      setVessels(parsedVessels);
+    }
+
     setLoading(false);
   }, [JSON.stringify(filters)]);
 
@@ -72,39 +110,49 @@ function useVessels(filters) {
     const t = setInterval(fetch_, 5000);
     return () => clearInterval(t);
   }, [fetch_]);
+
   return { vessels, loading, refetch: fetch_ };
 }
 
-// Polls every 3 s, shows last 1 hour of alerts only
+
+// Polls every 3s, shows last 1 hour of alerts only
 function useAlerts() {
   const [alerts, setAlerts] = useState([]);
   const [lastUpdate, setLastUpdate] = useState(null);
+
+  const load = useCallback(async () => {
+    const d = await apiFetch("/api/alerts", { hours_back: 1, limit: 100 });
+    if (d) {
+      setAlerts(d.alerts || []);
+      setLastUpdate(new Date());
+    }
+  }, []);
+
   useEffect(() => {
-    const load = async () => {
-      const d = await apiFetch("/api/alerts", { hours_back: 1, limit: 100 });
-      if (d) {
-        setAlerts(d.alerts || []);
-        setLastUpdate(new Date());
-      }
-    };
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  }, []);
+  }, [load]);
+
   return { alerts, lastUpdate };
 }
 
+
+// Polls analytics summary for Analytics panel
 function useAnalytics() {
   const [data, setData] = useState(null);
+
+  const load = useCallback(async () => {
+    const d = await apiFetch("/api/analytics/summary", { days_back: 14 });
+    if (d) setData(d);
+  }, []);
+
   useEffect(() => {
-    const load = async () => {
-      const d = await apiFetch("/api/analytics/summary", { days_back: 14 });
-      if (d) setData(d);
-    };
     load();
     const t = setInterval(load, 30000);
     return () => clearInterval(t);
-  }, []);
+  }, [load]);
+
   return data;
 }
 
@@ -332,8 +380,9 @@ const VesselMapPanel = () => {
           value={filters.vessel_type}
           onChange={e => setFilters(f => ({ ...f, vessel_type: e.target.value }))}>
           <option value="">All Types</option>
-          {["Cargo","Tanker","Passenger","Fishing","Military","Tug","Sailing"]
-            .map(t => <option key={t} value={t}>{t}</option>)}
+          {VESSEL_TYPE_OPTIONS.map(t => (
+            <option key={t.value} value={t.value}>{t.label}</option>
+          ))}
         </select>
         <span style={{ color: "#8B949E", fontSize: 13 }}>
           {loading ? "Loading..." : `${vessels.length.toLocaleString()} vessels`}
@@ -358,10 +407,13 @@ const VesselMapPanel = () => {
 
       {/* Map */}
       <div style={{ flex: 1, borderRadius: 12, overflow: "hidden", minHeight: 460 }}>
-        <MapContainer center={[30.5, 32.3]} zoom={6}
+        <MapContainer center={[38.5, -75.5]} zoom={6}
           style={{ height: "100%", width: "100%" }}>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-          {vessels.map(v => (
+          {vessels
+            .map(v => ({ ...v, lat: Number(v.lat), lon: Number(v.lon) }))
+            .filter(v => Number.isFinite(v.lat) && Number.isFinite(v.lon))
+            .map(v => (
             <Marker key={v.mmsi}
               position={[v.lat, v.lon]}
               icon={makeVesselIcon(
@@ -406,6 +458,32 @@ const DEMO_MMSIS = [
   { mmsi: "367060370", name: "EVEY T",             note: "217 records, ~1200 nm" },
   { mmsi: "368530000", name: "C HERO",             note: "180 records, ~2335 nm" },
 ];
+
+// Bearing (degrees, 0 = north) from point p1 to p2
+const computeBearing = (p1, p2) => {
+  const toRad = d => d * Math.PI / 180;
+  const dLon = toRad(p2.lon - p1.lon);
+  const lat1 = toRad(p1.lat), lat2 = toRad(p2.lat);
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
+};
+
+// Inline SVG ship icon for the replay marker, rotated to face direction of travel
+const makeReplayShipIcon = (bearing) => {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="38" height="38" viewBox="0 0 28 28">
+      <g transform="rotate(${bearing}, 14, 14)">
+        <path d="M14 2 C16 3.5 17 6 17 8.5 L17 23 Q17 26 14 26 Q11 26 11 23 L11 8.5 C11 6 12 3.5 14 2 Z" fill="#1A3A8F" stroke="white" stroke-width="0.9"/>
+        <path d="M14 4.5 C15.4 5.6 16 7.4 16 9 L16 22 Q16 23.8 14 23.8 Q12 23.8 12 22 L12 9 C12 7.4 12.6 5.6 14 4.5 Z" fill="#4F6FD0"/>
+        <rect x="12.4" y="15.5" width="3.2" height="4.2" rx="0.5" fill="white"/>
+        <rect x="12.8" y="16.2" width="2.4" height="0.9" rx="0.2" fill="#263238"/>
+        <rect x="12.6" y="9.5" width="2.8" height="1.3" rx="0.3" fill="#0D2A6B"/>
+        <rect x="12.6" y="11.6" width="2.8" height="1.3" rx="0.3" fill="#0D2A6B"/>
+      </g>
+    </svg>`;
+  return L.divIcon({ html: svg, className: "", iconSize: [38, 38], iconAnchor: [19, 19] });
+};
 
 // Smooth flyTo the track's first point at zoom 10 when the track changes
 const MapFlyTo = ({ points }) => {
@@ -460,6 +538,9 @@ const ReplayPanel = () => {
   }, [playing, speed, track]);
 
   const curr = track[frame];
+  const replayBearing = curr && track[frame + 1]
+    ? computeBearing(curr, track[frame + 1])
+    : (curr?.cog || curr?.heading || 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
@@ -546,20 +627,28 @@ const ReplayPanel = () => {
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           {/* Fly to first track point (zoom 10) whenever a new track loads */}
           {track.length > 0 && <MapFlyTo points={track} />}
-          {/* Full route polyline */}
+          {/* Full route polyline (ghost track) */}
           {track.length > 0 && (
             <Polyline positions={track.map(p => [p.lat, p.lon])}
-              color="#42A5F5" weight={2} opacity={0.6} />
+              color="#42A5F5" weight={2} opacity={0.25} />
           )}
-          {/* Animated vessel marker */}
+          {/* Growing trail — traveled portion only */}
+          {frame > 0 && (
+            <Polyline
+              positions={track.slice(0, frame + 1).map(p => [p.lat, p.lon])}
+              color="#FF5252" weight={3} opacity={0.85}
+            />
+          )}
+          {/* Animated ship icon, rotated to face direction of travel */}
           {curr && (
-            <CircleMarker center={[curr.lat, curr.lon]}
-              radius={12} color="#FF7043" fillColor="#FF7043" fillOpacity={0.9}>
+            <Marker
+              position={[curr.lat, curr.lon]}
+              icon={makeReplayShipIcon(replayBearing)}>
               <Popup>
                 SOG: {curr.sog?.toFixed(1)} kn<br />
                 {curr.base_datetime?.slice(0, 19)}
               </Popup>
-            </CircleMarker>
+            </Marker>
           )}
         </MapContainer>
       </div>
@@ -1011,18 +1100,20 @@ const AnomalyPanel = () => {
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, flex: 1 }}>
         <div style={{ borderRadius: 12, overflow: "hidden", minHeight: 400 }}>
-          <MapContainer center={[30.5, 32.3]} zoom={5}
+          <MapContainer center={[38.5, -75.5]} zoom={6}
             style={{ height: "100%", width: "100%" }}>
             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-            {anomalies.filter(a => a.lat && a.lon).map(a => (
+            {anomalies.filter(a => a.lat != null && a.lon != null).map(a => (
               <CircleMarker key={a.id} center={[a.lat, a.lon]}
-                radius={a.severity === "HIGH" ? 10 : 7}
+                radius={a.severity === "HIGH" ? 10 : a.severity === "MEDIUM" ? 8 : 6}
                 pathOptions={{
-                  color: ANOM_COLOR[a.type] || "#EF5350",
+                  color: a.severity === "HIGH" ? "#EF5350" : a.severity === "MEDIUM" ? "#FFA726" : "#4CAF50",
+                  fillColor: a.severity === "HIGH" ? "#EF5350" : a.severity === "MEDIUM" ? "#FFA726" : "#4CAF50",
                   fillOpacity: 0.85, weight: 1,
                 }}>
                 <Popup>
                   <b>{a.type}</b><br />
+                  Severity: {a.severity}<br />
                   MMSI: {a.mmsi}<br />
                   Score: {(a.score || 0).toFixed(2)}<br />
                   {a.description}
@@ -1103,16 +1194,41 @@ const CollisionPanel = ({ onNewCritical }) => {
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div style={{ borderRadius: 12, overflow: "hidden", minHeight: 380 }}>
-          <MapContainer center={[30.5, 32.3]} zoom={5}
+          <MapContainer center={[38.5, -75.5]} zoom={6}
             style={{ height: "100%", width: "100%" }}>
             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-            {risks.filter(r => r.lat && r.lon).map(r => (
+            {risks.filter(r => r.lat1 != null && r.lon1 != null && r.lat2 != null && r.lon2 != null).map(r => (
+              <React.Fragment key={r.id}>
+                <Polyline
+                  positions={[[r.lat1, r.lon1], [r.lat2, r.lon2]]}
+                  pathOptions={{ color: RISK_COLOR[r.severity] || "#EF5350", weight: 2, dashArray: "5,5" }}
+                />
+                <CircleMarker center={[r.lat1, r.lon1]}
+                  radius={r.severity === "CRITICAL" ? 12 : r.severity === "HIGH" ? 9 : 6}
+                  pathOptions={{ color: RISK_COLOR[r.severity] || "#EF5350", fillColor: RISK_COLOR[r.severity] || "#EF5350", fillOpacity: 0.9, weight: 2 }}>
+                  <Popup>
+                    <b>🚨 {r.severity}</b><br />
+                    {r.vessel_1 || r.mmsi_1}<br />
+                    Distance: {(r.distance_nm || 0).toFixed(3)} nm<br />
+                    {r.description}
+                  </Popup>
+                </CircleMarker>
+                <CircleMarker center={[r.lat2, r.lon2]}
+                  radius={r.severity === "CRITICAL" ? 12 : r.severity === "HIGH" ? 9 : 6}
+                  pathOptions={{ color: RISK_COLOR[r.severity] || "#EF5350", fillColor: RISK_COLOR[r.severity] || "#EF5350", fillOpacity: 0.9, weight: 2 }}>
+                  <Popup>
+                    <b>🚨 {r.severity}</b><br />
+                    {r.vessel_2 || r.mmsi_2}<br />
+                    Distance: {(r.distance_nm || 0).toFixed(3)} nm<br />
+                    {r.description}
+                  </Popup>
+                </CircleMarker>
+              </React.Fragment>
+            ))}
+            {risks.filter(r => (r.lat1 == null || r.lon1 == null) && r.lat != null && r.lon != null).map(r => (
               <CircleMarker key={r.id} center={[r.lat, r.lon]}
-                radius={r.severity === "CRITICAL" ? 14 : r.severity === "HIGH" ? 10 : 7}
-                pathOptions={{
-                  color: RISK_COLOR[r.severity] || "#EF5350",
-                  fillOpacity: 0.9, weight: 2,
-                }}>
+                radius={r.severity === "CRITICAL" ? 12 : r.severity === "HIGH" ? 9 : 6}
+                pathOptions={{ color: RISK_COLOR[r.severity] || "#EF5350", fillColor: RISK_COLOR[r.severity] || "#EF5350", fillOpacity: 0.9, weight: 2 }}>
                 <Popup>
                   <b>🚨 {r.severity}</b><br />
                   {r.vessel_1 || r.mmsi_1} ↔ {r.vessel_2 || r.mmsi_2}<br />

@@ -24,6 +24,7 @@ from pyspark.sql.functions import (
     col, current_timestamp, when,
     round as spark_round, lit,
     year, month, dayofmonth, hour,
+    to_timestamp,
 )
 
 
@@ -38,12 +39,10 @@ def build_spark() -> SparkSession:
                 "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.sql.shuffle.partitions", "8")
         .config("spark.driver.memory", "2g")
-        # Fix timestamp NTZ vs TZ conflict
         .config("spark.sql.parquet.datetimeRebaseModeInRead",  "CORRECTED")
         .config("spark.sql.parquet.datetimeRebaseModeInWrite", "CORRECTED")
         .config("spark.sql.parquet.int96RebaseModeInRead",     "CORRECTED")
         .config("spark.sql.parquet.int96RebaseModeInWrite",    "CORRECTED")
-        .config("spark.sql.timestampType", "TIMESTAMP_NTZ")
         .getOrCreate()
     )
 
@@ -52,11 +51,13 @@ def enrich(df):
     """Add Bronze enrichment columns to raw Parquet data."""
     return (
         df
-        # Timestamp columns — cast to TIMESTAMP_NTZ to match Delta schema
+        # Keep base_datetime as string in Bronze; Silver converts to timestamp
+        .withColumn("base_datetime",
+                    col("base_datetime").cast("string"))
         .withColumn("event_time",
-                    col("base_datetime").cast("timestamp_ntz"))
+                    to_timestamp(col("base_datetime")))
         .withColumn("ingestion_time",
-                    current_timestamp().cast("timestamp_ntz"))
+                    current_timestamp())
 
         # Speed flags
         .withColumn("is_stopped",  col("sog") < 0.5)
@@ -112,13 +113,15 @@ def main():
     # ── Enrich ─────────────────────────────────────────────────────────────────
     df_enriched = enrich(df)
 
-    # ── Write to Bronze Delta (NO partitionBy — table initialised without it) ──
+    # ── Write to Bronze Delta ─────────────────────────────────────────────────
+    # overwrite: rebuilds the batch snapshot cleanly.
+    # spark_streaming_consumer.py uses mode("append") for the live path.
     print(f"\n💾  Writing to Bronze Delta: {DELTA_BRONZE_PATH}")
     (
         df_enriched.write
         .format("delta")
-        .mode("append")
-        .option("mergeSchema", "true")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
         .save(DELTA_BRONZE_PATH)
     )
 

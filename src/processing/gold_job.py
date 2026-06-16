@@ -158,8 +158,11 @@ def main():
     print(f"    Silver rows: {total:,}")
 
 
-    # ── Gold 1: Latest vessel positions ───────────────────────────────────────
-    print("\n🔨  Building Gold: Vessel Latest ...")
+    # ── Gold 1: Latest vessel positions (Delta only — NOT synced to PostgreSQL)
+    # fact_vessel_latest is owned by live_scorer.py which maintains it in
+    # real-time via UPSERT. Syncing here would truncate the table mid-run,
+    # causing a brief live map outage. Delta Gold is kept for ML / analytics use.
+    print("\n🔨  Building Gold: Vessel Latest (Delta only) ...")
     vessel_latest = build_gold_vessel_latest(silver)
     (
         vessel_latest.write
@@ -168,8 +171,7 @@ def main():
         .option("overwriteSchema", "true")
         .save(DELTA_GOLD_VESSEL_PATH)
     )
-    sync_to_postgres(vessel_latest, "fact_vessel_latest")
-    print(f"✅  Gold Vessel Latest: "
+    print(f"✅  Gold Vessel Latest (Delta): "
           f"{vessel_latest.count():,} unique vessels")
 
     # ── Gold 2: Traffic density ───────────────────────────────────────────────
