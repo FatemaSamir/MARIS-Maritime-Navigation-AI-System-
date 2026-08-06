@@ -1,0 +1,111 @@
+# =========================
+# Large Data Files
+# =========================
+*.csv
+*.zst
+*.parquet
+*.json.gz
+
+data/
+raw/
+bronze/
+silver/
+gold/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.venv/
+venv/
+env/
+
+*.egg-info/
+.pytest_cache/
+
+# =========================
+# Node / React
+# =========================
+node_modules/
+build/
+dist/
+
+frontend/node_modules/
+frontend/build/
+
+# =========================
+# Environment & Secrets
+# =========================
+.env
+.env.*
+*.env
+
+# =========================
+# Docker Volumes
+# =========================
+volumes/
+postgres_data/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+.claude/
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# ML Training Artifacts
+# =========================
+mlruns/
+artifacts/
+checkpoints/
+
+# Optional large training outputs
+*.h5
+*.joblib
+
+# =========================
+# Logs
+# =========================
+*.log
+# Data / generated files
+data/
+delta/
+*.csv
+*.parquet
+*.db
+metastore_db/
+src/metastore_db/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+airflow/logs/
+
+# Large model artifacts
+models/*.pkl
+models/*.joblib
+
+# Database backups
+*.sql
+*.sql.gz
+.github/workflows/
+.github/workflows/
