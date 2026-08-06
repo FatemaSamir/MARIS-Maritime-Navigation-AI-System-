@@ -344,3 +344,9 @@ Demo/
 **Lamiaa Nasser**
 
  Data Engineer | Big Data & AI Engineer
+
+ Copyright (c) 2026 Fatema Samir
+
+All Rights Reserved.
+
+This source code is proprietary.
